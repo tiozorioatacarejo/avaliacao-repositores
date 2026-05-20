@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Avaliação de Performance de Repositores</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">Auditoria operacional</p>
+          <h1>Avaliação de performance de repositores</h1>
+        </div>
+        <div class="final-score" aria-live="polite">
+          <span>Nota final</span>
+          <strong id="finalScore">100,0</strong>
+          <em id="finalClass">Excelente</em>
+        </div>
+      </header>
+
+      <form id="evaluationForm">
+        <section class="section-panel">
+          <div class="section-title">
+            <h2>Dados da avaliação</h2>
+          </div>
+          <div class="field-grid">
+            <label>
+              <span>Data</span>
+              <input id="date" name="date" type="date" required />
+            </label>
+            <label>
+              <span>Nome do repositor</span>
+              <input id="stockerName" name="stockerName" type="text" placeholder="Nome completo" required />
+            </label>
+            <label>
+              <span>Setor</span>
+              <input id="sector" name="sector" type="text" placeholder="Ex.: Mercearia" required />
+            </label>
+            <label>
+              <span>Auditor</span>
+              <input id="auditor" name="auditor" type="text" placeholder="Responsável pela auditoria" required />
+            </label>
+          </div>
+        </section>
+
+        <section class="score-grid" id="scoreCards" aria-label="Resumo dos resultados"></section>
+
+        <section class="section-panel">
+          <div class="section-title">
+            <div>
+              <h2>1. Ruptura</h2>
+              <p>Peso 40% · Audite 10 itens e marque OK ou Ruptura.</p>
+            </div>
+            <strong id="ruptureScore">100,0</strong>
+          </div>
+          <div class="audit-list" id="ruptureItems"></div>
+        </section>
+
+        <section class="section-panel">
+          <div class="section-title">
+            <div>
+              <h2>2. Validade/FIFO</h2>
+              <p>Peso 20% · Informe a quantidade de ocorrências encontradas.</p>
+            </div>
+            <strong id="fifoScore">100,0</strong>
+          </div>
+          <label class="occurrence-field">
+            <span>Quantidade de ocorrências</span>
+            <input id="fifoOccurrences" name="fifoOccurrences" type="number" min="0" step="1" value="0" />
+          </label>
+        </section>
+
+        <section class="section-panel">
+          <div class="section-title">
+            <div>
+              <h2>3. Precificação</h2>
+              <p>Peso 15% · Audite 10 itens e marque se o preço está correto ou errado.</p>
+            </div>
+            <strong id="pricingScore">100,0</strong>
+          </div>
+          <div class="audit-list" id="pricingItems"></div>
+        </section>
+
+        <section class="section-panel">
+          <div class="section-title">
+            <div>
+              <h2>4. Organização e limpeza</h2>
+              <p>Peso 10% · Cada item marcado vale 20 pontos.</p>
+            </div>
+            <strong id="organizationScore">100,0</strong>
+          </div>
+          <div class="checklist" id="organizationItems"></div>
+        </section>
+
+        <section class="section-panel">
+          <div class="section-title">
+            <div>
+              <h2>5. Execução de ofertas</h2>
+              <p>Peso 15% · Cada item marcado vale 20 pontos.</p>
+            </div>
+            <strong id="offersScore">100,0</strong>
+          </div>
+          <div class="checklist" id="offersItems"></div>
+        </section>
+
+        <footer class="actions">
+          <button class="secondary" type="reset">Limpar avaliação</button>
+          <button class="primary" type="submit">Gerar planilha Excel</button>
+        </footer>
+      </form>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
