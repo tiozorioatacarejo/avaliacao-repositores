@@ -585,6 +585,16 @@ async function api(req, res, url) {
     return send(res, 200, { ok: true, message: "Preenchimento excluído." });
   }
 
+  if (method === "GET" && url.pathname === "/api/summaries") {
+    if (!canCorrect(user)) {
+      return send(res, 403, { error: "Apenas administrador ou encarregada podem visualizar resumos." });
+    }
+    const rows = await query(
+      "SELECT * FROM operational_summaries ORDER BY date DESC LIMIT 60"
+    );
+    return send(res, 200, { rows });
+  }
+
   if (method === "GET" && url.pathname === "/api/summary") {
     const date = url.searchParams.get("date") || today();
     const rows = await query("SELECT * FROM operational_summaries WHERE date = ?", [date]);

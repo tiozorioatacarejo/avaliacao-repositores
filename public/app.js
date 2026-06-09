@@ -512,6 +512,7 @@ function renderSummary() {
         <button class="btn danger" type="button" id="deleteSummary">Excluir resumo da data</button>
       </div>
     </form>
+    <div class="table-wrap" style="margin-top:14px" id="summaryTable"></div>
   `;
   const form = document.getElementById("summaryForm");
   const clearSummaryFields = () => {
@@ -540,6 +541,61 @@ function renderSummary() {
     fillSummaryForm(data.row);
     toast(data.row ? "Resumo carregado para edição." : "Nenhum resumo encontrado para essa data.");
   };
+  const refreshSummaryTable = async () => {
+    const data = await api("/api/summaries");
+    document.getElementById("summaryTable").innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>Data</th>
+            <th>Perdas</th>
+            <th>Consumos</th>
+            <th>Vasilhames</th>
+            <th>Qual vasilhame</th>
+            <th>Recebimentos</th>
+            <th>Ações</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.rows.map((row) => `
+            <tr>
+              <td data-label="Data">${fmtDate(row.date)}</td>
+              <td data-label="Perdas">${fmtMoney(row.losses_value)}</td>
+              <td data-label="Consumos">${fmtMoney(row.consumption_value)}</td>
+              <td data-label="Vasilhames">${row.bottles_count || 0}</td>
+              <td data-label="Qual vasilhame">${escapeHtml(row.bottles_details || "")}</td>
+              <td data-label="Recebimentos">${row.receipts_count || 0}</td>
+              <td data-label="Ações">
+                <div class="toolbar">
+                  <button class="btn" type="button" data-edit-summary="${row.date}">Editar</button>
+                  <button class="btn danger" type="button" data-delete-summary="${row.date}">Excluir</button>
+                </div>
+              </td>
+            </tr>
+          `).join("") || `<tr><td colspan="7">Nenhum resumo lançado.</td></tr>`}
+        </tbody>
+      </table>
+    `;
+    document.querySelectorAll("[data-edit-summary]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        form.date.value = button.dataset.editSummary;
+        await loadSummaryForDate();
+        form.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
+    document.querySelectorAll("[data-delete-summary]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const date = button.dataset.deleteSummary;
+        const confirmed = confirm(`Excluir o resumo operacional de ${fmtDate(date)}?`);
+        if (!confirmed) return;
+        const result = await api(`/api/summary?date=${encodeURIComponent(date)}`, { method: "DELETE" });
+        if (form.date.value === date) clearSummaryFields();
+        await loadDashboard();
+        await refreshSummaryTable();
+        toast(result.message || "Resumo excluído.");
+      });
+    });
+  };
   form.date.addEventListener("change", loadSummaryForDate);
   document.getElementById("loadSummary").addEventListener("click", loadSummaryForDate);
   document.getElementById("deleteSummary").addEventListener("click", async () => {
@@ -548,6 +604,7 @@ function renderSummary() {
     const result = await api(`/api/summary?date=${encodeURIComponent(form.date.value)}`, { method: "DELETE" });
     clearSummaryFields();
     await loadDashboard();
+    await refreshSummaryTable();
     toast(result.message || "Resumo excluído.");
   });
   form.addEventListener("submit", async (event) => {
@@ -555,9 +612,11 @@ function renderSummary() {
     const body = Object.fromEntries(new FormData(event.currentTarget).entries());
     await api("/api/summary", { method: "POST", body: JSON.stringify(body) });
     await loadDashboard();
+    await refreshSummaryTable();
     toast("Resumo operacional salvo.");
   });
   loadSummaryForDate();
+  refreshSummaryTable();
 }
 
 function reportFiltersHtml() {
