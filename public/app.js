@@ -17,6 +17,11 @@ const state = {
 const app = document.getElementById("app");
 const PRICE_DIVERGENCE_ACTIVITY = "Conferência de precificação";
 const EXPIRED_PRODUCTS_ACTIVITY = "Verificação de validades";
+const ENCARREGADA_ONLY_ACTIVITIES = [
+  "Lançamento de perdas no sistema",
+  "Lançamento de consumo interno",
+  "Contagem e acompanhamento de vasilhames",
+];
 
 function api(path, options = {}) {
   return fetch(path, {
@@ -65,6 +70,16 @@ function isLinkedCollaborator() {
 
 function canAccessSummary() {
   return ["administrador", "encarregada"].includes(state.user?.role);
+}
+
+function canFillEncarregadaOnly() {
+  return state.user?.role === "encarregada";
+}
+
+function checklistActivitiesForUser() {
+  return state.activities.filter((activity) => (
+    canFillEncarregadaOnly() || !ENCARREGADA_ONLY_ACTIVITIES.includes(activity)
+  ));
 }
 
 function toast(message) {
@@ -315,7 +330,7 @@ function renderDashboard() {
     <div class="grid two" style="margin-top:14px">
       <section class="panel">
         <h3>Engajamento por colaborador</h3>
-        <div class="muted" style="margin-top:4px">Participação nos preenchimentos realizados no mês</div>
+        <div class="muted" style="margin-top:4px">Participação nos preenchimentos do mês, sem considerar perdas, consumos e vasilhames</div>
         <div class="table-wrap" style="margin-top:12px">
           <table><thead><tr><th>Colaborador</th><th>Preenchimentos</th><th>Engajamento</th></tr></thead><tbody>
             ${data.collaboratorCompletion.map((row) => `
@@ -411,6 +426,7 @@ function collaboratorOptions(activeOnly = true) {
 }
 
 function renderChecklist() {
+  const availableActivities = checklistActivitiesForUser();
   const linkedCollaborator = state.user?.collaborator_id
     ? state.collaborators.find((item) => Number(item.id) === Number(state.user.collaborator_id))
     : null;
@@ -437,7 +453,7 @@ function renderChecklist() {
       <div class="grid two">
         ${collaboratorField}
         <label>Atividade
-          <select name="activity" required>${state.activities.map((item) => `<option>${escapeHtml(item)}</option>`).join("")}</select>
+          <select name="activity" required>${availableActivities.map((item) => `<option>${escapeHtml(item)}</option>`).join("")}</select>
         </label>
       </div>
       <div class="grid two">
@@ -482,6 +498,7 @@ function renderChecklist() {
 }
 
 function renderSummary() {
+  const summaryLocked = !canFillEncarregadaOnly();
   view.innerHTML = `
     <div class="topbar">
       <div>
@@ -489,6 +506,7 @@ function renderSummary() {
         <div class="muted">Consolidação do dia para acompanhamento gerencial</div>
       </div>
     </div>
+    ${summaryLocked ? `<div class="panel muted" style="margin-bottom:14px">Somente a encarregada pode preencher, alterar ou excluir perdas, consumos e vasilhames.</div>` : ""}
     <form class="panel grid" id="summaryForm">
       <div class="grid three">
         <label>Data do resumo <input name="date" type="date" required value="${todayInputValue()}"></label>
@@ -507,14 +525,19 @@ function renderSummary() {
         <label>Ações corretivas realizadas <textarea name="correctiveActions"></textarea></label>
       </div>
       <div class="toolbar">
-        <button class="btn primary" type="submit">Salvar / corrigir resumo</button>
+        <button class="btn primary" type="submit" ${summaryLocked ? "disabled" : ""}>Salvar / corrigir resumo</button>
         <button class="btn" type="button" id="loadSummary">Carregar data</button>
-        <button class="btn danger" type="button" id="deleteSummary">Excluir resumo da data</button>
+        <button class="btn danger" type="button" id="deleteSummary" ${summaryLocked ? "disabled" : ""}>Excluir resumo da data</button>
       </div>
     </form>
     <div class="table-wrap" style="margin-top:14px" id="summaryTable"></div>
   `;
   const form = document.getElementById("summaryForm");
+  if (summaryLocked) {
+    ["lossesValue", "consumptionValue", "bottlesCount", "receiptsCount", "bottlesDetails", "occurrences", "correctiveActions"].forEach((name) => {
+      form.elements[name].disabled = true;
+    });
+  }
   const clearSummaryFields = () => {
     form.lossesValue.value = "";
     form.consumptionValue.value = "";
@@ -568,7 +591,7 @@ function renderSummary() {
               <td data-label="Ações">
                 <div class="toolbar">
                   <button class="btn" type="button" data-edit-summary="${row.date}">Editar</button>
-                  <button class="btn danger" type="button" data-delete-summary="${row.date}">Excluir</button>
+                  ${canFillEncarregadaOnly() ? `<button class="btn danger" type="button" data-delete-summary="${row.date}">Excluir</button>` : ""}
                 </div>
               </td>
             </tr>
