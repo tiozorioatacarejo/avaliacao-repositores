@@ -19,6 +19,7 @@
     sectors: [],
     activities: [],
     repoCollaboratorIds: [],
+    commercialCollaboratorIds: [],
     repoUsers: [],
     commercialUsers: [],
     dashboard: null,
@@ -241,6 +242,7 @@ async function bootstrap() {
       state.repo.sectors = repoOptions.sectors;
       state.repo.activities = repoOptions.activities;
       state.repo.repoCollaboratorIds = repoOptions.repoCollaboratorIds || [];
+      state.repo.commercialCollaboratorIds = repoOptions.commercialCollaboratorIds || [];
       state.repo.repoUsers = repoOptions.repoUsers || [];
       state.repo.commercialUsers = repoOptions.commercialUsers || [];
     }
@@ -590,10 +592,27 @@ function collaboratorOptions(activeOnly = true) {
     .join("");
 }
 
+function preventionCollaboratorOptions(activeOnly = true) {
+  const repo = new Set((state.repo.repoCollaboratorIds || []).map((id) => Number(id)));
+  const commercial = new Set((state.repo.commercialCollaboratorIds || []).map((id) => Number(id)));
+  return state.collaborators
+    .filter((item) => (
+      (!activeOnly || item.status === "ativo")
+      && !repo.has(Number(item.id))
+      && !commercial.has(Number(item.id))
+      && !isCommercialCollaborator(item)
+      && collaboratorSectors(item).length === 0
+    ))
+    .map((item) => `<option value="${item.id}">${escapeHtml(item.name)} - ${escapeHtml(item.role)}</option>`)
+    .join("");
+}
+
 function repoCollaboratorOptions() {
   const allowed = new Set((state.repo.repoCollaboratorIds || []).map((id) => Number(id)));
+  const commercial = new Set((state.repo.commercialCollaboratorIds || []).map((id) => Number(id)));
   const rows = state.collaborators.filter((item) => (
     item.status === "ativo"
+    && !commercial.has(Number(item.id))
     && !isCommercialCollaborator(item)
     && (allowed.has(Number(item.id)) || collaboratorSectors(item).length > 0)
   ));
@@ -676,7 +695,7 @@ function renderChecklist() {
     `
     : `
       <label>Colaborador
-        <select name="collaboratorId" required>${collaboratorOptions()}</select>
+        <select name="collaboratorId" required>${preventionCollaboratorOptions()}</select>
       </label>
     `;
   view.innerHTML = `
@@ -885,7 +904,7 @@ function reportFiltersHtml() {
       <label>Data <input name="date" type="date"></label>
       <label>InÃ­cio <input name="startDate" type="date"></label>
       <label>Fim <input name="endDate" type="date"></label>
-      <label>Colaborador <select name="collaboratorId"><option value="">Todos</option>${collaboratorOptions(false)}</select></label>
+      <label>Colaborador <select name="collaboratorId"><option value="">Todos</option>${preventionCollaboratorOptions(false)}</select></label>
     </div>
     <label>Atividade <select name="activity"><option value="">Todas</option>${state.activities.map((item) => `<option>${escapeHtml(item)}</option>`).join("")}</select></label>
   `;
@@ -1398,7 +1417,7 @@ function renderPendencies() {
     </div>
     <form class="panel grid" id="pendencyForm">
       <div class="grid three">
-        <label>ResponsÃ¡vel <select name="responsibleId" required>${collaboratorOptions()}</select></label>
+        <label>ResponsÃ¡vel <select name="responsibleId" required>${preventionCollaboratorOptions()}</select></label>
         <label>Data de abertura <input name="openedAt" type="date" required value="${new Date().toISOString().slice(0, 10)}"></label>
         <label>Status <select name="status"><option>Aberto</option><option>Em andamento</option><option>Resolvido</option></select></label>
       </div>
