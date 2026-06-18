@@ -1,4 +1,4 @@
-const http = require("http");
+﻿const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -15,12 +15,42 @@ const DATABASE_URL = process.env.DATABASE_URL || "";
 let pgPool = null;
 
 const sessions = new Map();
-const PRICE_DIVERGENCE_ACTIVITY = "Conferência de precificação";
-const EXPIRED_PRODUCTS_ACTIVITY = "Verificação de validades";
+const PRICE_DIVERGENCE_ACTIVITY = "Confer\u00eancia de precifica\u00e7\u00e3o";
+const EXPIRED_PRODUCTS_ACTIVITY = "Verifica\u00e7\u00e3o de validades";
+const RECEIPTS_ACTIVITY = "Acompanhamento de recebimentos";
 const ENGAGEMENT_EXCLUDED_ACTIVITIES = [
-  "Lançamento de perdas no sistema",
-  "Lançamento de consumo interno",
+  "Lan\u00e7amento de perdas no sistema",
+  "Lan\u00e7amento de consumo interno",
   "Contagem e acompanhamento de vasilhames",
+];
+
+const repoSectors = [
+  "A\u00e7ougue",
+  "Bazar",
+  "Bebidas",
+  "FLV e Granjeiro",
+  "Limpeza",
+  "Mercearia doce",
+  "Mercearia salgada",
+  "Mercearia seca",
+  "Padaria",
+  "Perec\u00edveis",
+  "Perfumaria",
+];
+
+const repoActivities = [
+  "Limpeza do setor",
+  "Organiza\u00e7\u00e3o de g\u00f4ndolas",
+  "Abastecimento de produtos",
+  "Precifica\u00e7\u00e3o - placas de ofertas",
+  "Precifica\u00e7\u00e3o - etiqueta de pre\u00e7o normal",
+  "Verifica\u00e7\u00e3o de validades",
+  "Ruptura de produto em loja",
+  "Ruptura para direcionar ao comercial",
+  "Controle de avarias",
+  "Ponta de g\u00f4ndola e ilhas organizadas",
+  "Confer\u00eancia de estoque no dep\u00f3sito",
+  "Devolu\u00e7\u00e3o de produtos ao setor correto",
 ];
 
 const activities = [
@@ -28,20 +58,20 @@ const activities = [
   "Temperatura 10h",
   "Temperatura 16h",
   "Temperatura 19h",
-  "Lançamento de perdas no sistema",
-  "Lançamento de consumo interno",
+  "Lan\u00e7amento de perdas no sistema",
+  "Lan\u00e7amento de consumo interno",
   "Contagem e acompanhamento de vasilhames",
-  "Acompanhamento de cotações",
+  "Acompanhamento de cota\u00e7\u00f5es",
   "Acompanhamento de recebimentos",
   "Monitoramento loja / App Veesion",
-  "Conferência de precificação",
-  "Verificação de validades",
-  "Verificação de água do bebedouro",
+  "Confer\u00eancia de precifica\u00e7\u00e3o",
+  "Verifica\u00e7\u00e3o de validades",
+  "Verifica\u00e7\u00e3o de \u00e1gua do bebedouro",
   "Acompanhamento da vitrine",
   "Portas e acessos conferidos",
   "Cancelamentos e estornos verificados",
   "Passagem de itens de forma correta no caixa",
-  "Devolução de produtos acompanhadas",
+  "Devolu\u00e7\u00e3o de produtos acompanhadas",
 ];
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -81,6 +111,7 @@ async function initPostgres(pool) {
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
       role TEXT NOT NULL,
+      sector TEXT,
       status TEXT NOT NULL DEFAULT 'ativo',
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -131,7 +162,68 @@ async function initPostgres(pool) {
       created_by INTEGER NOT NULL REFERENCES users(id),
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS repo_tasks (
+      id SERIAL PRIMARY KEY,
+      date TEXT NOT NULL,
+      collaborator_id INTEGER NOT NULL REFERENCES collaborators(id),
+      sector TEXT NOT NULL,
+      activity TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'Realizado',
+      observation TEXT,
+      sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_by INTEGER NOT NULL REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS repo_ruptures (
+      id SERIAL PRIMARY KEY,
+      date TEXT NOT NULL,
+      product TEXT NOT NULL,
+      sector TEXT NOT NULL,
+      type TEXT NOT NULL,
+      quantity TEXT,
+      observation TEXT,
+      status TEXT NOT NULL DEFAULT 'Aberto',
+      commercial_status TEXT NOT NULL DEFAULT 'Pendente',
+      commercial_observation TEXT,
+      commercial_updated_by INTEGER REFERENCES users(id),
+      sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP,
+      created_by INTEGER NOT NULL REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS repo_expirations (
+      id SERIAL PRIMARY KEY,
+      date TEXT NOT NULL,
+      product TEXT NOT NULL,
+      sector TEXT NOT NULL,
+      expiration_date TEXT NOT NULL,
+      quantity TEXT,
+      observation TEXT,
+      status TEXT NOT NULL DEFAULT 'Aberto',
+      commercial_status TEXT NOT NULL DEFAULT 'Pendente',
+      commercial_observation TEXT,
+      commercial_updated_by INTEGER REFERENCES users(id),
+      sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP,
+      created_by INTEGER NOT NULL REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS repo_damages (
+      id SERIAL PRIMARY KEY,
+      date TEXT NOT NULL,
+      product TEXT NOT NULL,
+      sector TEXT NOT NULL,
+      quantity TEXT,
+      reason TEXT,
+      action TEXT,
+      sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_by INTEGER NOT NULL REFERENCES users(id)
+    );
   `);
+  await pool.query("ALTER TABLE collaborators ADD COLUMN IF NOT EXISTS sector TEXT");
+  await pool.query("ALTER TABLE repo_ruptures ADD COLUMN IF NOT EXISTS commercial_updated_by INTEGER REFERENCES users(id)");
+  await pool.query("ALTER TABLE repo_expirations ADD COLUMN IF NOT EXISTS commercial_updated_by INTEGER REFERENCES users(id)");
   const existing = await pool.query("SELECT COUNT(*) AS total FROM users");
   if (Number(existing.rows[0].total) === 0) {
     await pool.query(
@@ -152,7 +244,7 @@ async function runDb(payload) {
       const result = await pool.query(toPostgresSql(payload.sql), payload.params || []);
       return { changes: result.rowCount };
     }
-    throw new Error("Ação de banco inválida");
+    throw new Error("AÃ§Ã£o de banco invÃ¡lida");
   }
   const result = spawnSync(PYTHON, [path.join(ROOT, "scripts", "db.py")], {
     input: JSON.stringify(payload),
@@ -193,7 +285,7 @@ function readBody(req) {
       try {
         resolve(JSON.parse(body));
       } catch {
-        reject(new Error("JSON inválido"));
+        reject(new Error("JSON invÃ¡lido"));
       }
     });
   });
@@ -213,7 +305,7 @@ function currentUser(req) {
 function requireUser(req, res) {
   const user = currentUser(req);
   if (!user) {
-    send(res, 401, { error: "Sessão expirada. Faça login novamente." });
+    send(res, 401, { error: "SessÃ£o expirada. FaÃ§a login novamente." });
     return null;
   }
   return user;
@@ -229,6 +321,66 @@ function canDeleteRecords(user) {
 
 function isAdmin(user) {
   return user.role === "administrador";
+}
+
+function canAccessPrevention(user) {
+  return ["administrador", "prevencao", "colaborador", "encarregada"].includes(user.role);
+}
+
+function canAccessReposition(user) {
+  return ["administrador", "reposicao", "comercial"].includes(user.role);
+}
+
+function canUpdateRepoCommercial(user) {
+  return ["administrador", "comercial"].includes(user.role);
+}
+
+function parseCollaboratorSectors(value) {
+  if (!value) return [];
+  const clean = (item) => String(item ?? "").trim();
+  if (Array.isArray(value)) return value.map(clean).filter(Boolean);
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) return parsed.map(clean).filter(Boolean);
+  } catch (error) {
+    // Compatibilidade com cadastros antigos que guardavam um setor em texto.
+  }
+  return String(value).split("||").map(clean).filter(Boolean);
+}
+
+async function validateRepoSectorForUser(user, sector) {
+  if (user.role !== "reposicao" || !user.collaborator_id) return null;
+  const rows = await query("SELECT sector FROM collaborators WHERE id = ?", [user.collaborator_id]);
+  const assigned = parseCollaboratorSectors(rows[0]?.sector);
+  if (!assigned.length) return "Nenhum setor est\u00e1 direcionado para o seu acesso.";
+  if (assigned.includes(sector)) return null;
+  return "Este setor n\u00e3o est\u00e1 direcionado para o seu acesso.";
+}
+
+async function sectorsForUser(user) {
+  if (!user.collaborator_id) return [];
+  const rows = await query("SELECT sector FROM collaborators WHERE id = ?", [user.collaborator_id]);
+  return parseCollaboratorSectors(rows[0]?.sector);
+}
+
+async function commercialSectorFilter(user, column = "sector") {
+  if (user.role !== "comercial") return { clause: "", params: [] };
+  const sectors = await sectorsForUser(user);
+  if (!sectors.length) return { clause: " AND 1 = 0", params: [] };
+  return {
+    clause: ` AND ${column} IN (${sectors.map(() => "?").join(", ")})`,
+    params: sectors,
+  };
+}
+
+async function validateCommercialRecordSector(user, table, id) {
+  if (user.role !== "comercial") return null;
+  const sectors = await sectorsForUser(user);
+  if (!sectors.length) return "Nenhum setor est\u00e1 direcionado para o seu acesso comercial.";
+  const rows = await query(`SELECT sector FROM ${table} WHERE id = ?`, [id]);
+  if (!rows[0]) return "Registro n\u00e3o encontrado.";
+  if (sectors.includes(rows[0].sector)) return null;
+  return "Este registro pertence a um setor que n\u00e3o est\u00e1 direcionado para o seu acesso comercial.";
 }
 
 function canFillEncarregadaOnly(user) {
@@ -337,7 +489,7 @@ async function rowsForReports(filters) {
 }
 
 function makeExcel(rows) {
-  const header = ["Data", "Hora de envio", "Colaborador", "Atividade", "Sim/Nao", "Observacao", "Enviado por"];
+  const header = ["Data", "Hora de envio", "Colaborador", "Atividade", "Sim/NÃ£o", "ObservaÃ§Ã£o", "Enviado por"];
   const xmlRows = [header, ...rows.map((row) => [
     row.date,
     row.sent_at,
@@ -354,14 +506,14 @@ function makeExcel(rows) {
 
 function makePdf(rows) {
   const lines = [
-    "Relatório Diário de Atividades - Prevenção de Perdas",
-    "Atacarejo Antônio de Ozório",
+    "RelatÃ³rio DiÃ¡rio de Atividades - PrevenÃ§Ã£o de Perdas",
+    "Atacarejo AntÃ´nio de OzÃ³rio",
     `Gerado em: ${new Date().toLocaleString("pt-BR")}`,
     "",
     ...rows.flatMap((row) => [
       `${row.date} | ${row.collaborator} | ${row.activity}`,
       `Resposta: ${row.answer}`,
-      `Observacao: ${row.observation || "-"}`,
+      `ObservaÃ§Ã£o: ${row.observation || "-"}`,
       "",
     ]),
   ];
@@ -418,7 +570,7 @@ async function api(req, res, url) {
       body.password,
       ]
     );
-    if (!users[0]) return send(res, 401, { error: "Usuário ou senha inválidos." });
+    if (!users[0]) return send(res, 401, { error: "UsuÃ¡rio ou senha invÃ¡lidos." });
     const token = makeToken(users[0]);
     sessions.set(token, users[0]);
     return send(res, 200, { token, user: users[0] });
@@ -429,6 +581,247 @@ async function api(req, res, url) {
 
   if (method === "GET" && url.pathname === "/api/me") {
     return send(res, 200, { user, activities });
+  }
+
+  if (method === "GET" && url.pathname === "/api/reposition/options") {
+    if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
+    const repoUsers = await query(
+      "SELECT id, display_name, collaborator_id FROM users WHERE role = 'reposicao' AND status = 'ativo' ORDER BY display_name"
+    );
+    const commercialUsers = await query(
+      "SELECT id, display_name FROM users WHERE role = 'comercial' AND status = 'ativo' ORDER BY display_name"
+    );
+    return send(res, 200, {
+      sectors: repoSectors,
+      activities: repoActivities,
+      repoCollaboratorIds: repoUsers.map((row) => row.collaborator_id).filter(Boolean),
+      repoUsers,
+      commercialUsers,
+    });
+  }
+
+  if (method === "GET" && url.pathname === "/api/reposition/dashboard") {
+    if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
+    const start = url.searchParams.get("startDate") || today();
+    const end = url.searchParams.get("endDate") || start;
+    const commercialFilter = await commercialSectorFilter(user);
+    const taskRows = await query("SELECT status, COUNT(*) AS total FROM repo_tasks WHERE date BETWEEN ? AND ? GROUP BY status", [start, end]);
+    const ruptureRows = await query(`SELECT status, commercial_status, COUNT(*) AS total FROM repo_ruptures WHERE date BETWEEN ? AND ?${commercialFilter.clause} GROUP BY status, commercial_status`, [start, end, ...commercialFilter.params]);
+    const expirationRows = await query(`SELECT status, commercial_status, COUNT(*) AS total FROM repo_expirations WHERE date BETWEEN ? AND ?${commercialFilter.clause} GROUP BY status, commercial_status`, [start, end, ...commercialFilter.params]);
+    const damageRows = await query("SELECT COUNT(*) AS total FROM repo_damages WHERE date BETWEEN ? AND ?", [start, end]);
+    const bySector = await query(
+      `
+      SELECT sector,
+        SUM(tasks) AS tasks,
+        SUM(ruptures) AS ruptures,
+        SUM(expirations) AS expirations,
+        SUM(damages) AS damages
+      FROM (
+        SELECT sector, COUNT(*) AS tasks, 0 AS ruptures, 0 AS expirations, 0 AS damages FROM repo_tasks WHERE date BETWEEN ? AND ? GROUP BY sector
+        UNION ALL
+        SELECT sector, 0, COUNT(*), 0, 0 FROM repo_ruptures WHERE date BETWEEN ? AND ? GROUP BY sector
+        UNION ALL
+        SELECT sector, 0, 0, COUNT(*), 0 FROM repo_expirations WHERE date BETWEEN ? AND ? GROUP BY sector
+        UNION ALL
+        SELECT sector, 0, 0, 0, COUNT(*) FROM repo_damages WHERE date BETWEEN ? AND ? GROUP BY sector
+      ) x
+      GROUP BY sector
+      ORDER BY sector
+      `,
+      [start, end, start, end, start, end, start, end]
+    );
+    const taskTotal = taskRows.reduce((sum, row) => sum + Number(row.total || 0), 0);
+    const completed = taskRows.filter((row) => row.status === "Realizado").reduce((sum, row) => sum + Number(row.total || 0), 0);
+    const ruptures = ruptureRows.reduce((sum, row) => sum + Number(row.total || 0), 0);
+    const expirations = expirationRows.reduce((sum, row) => sum + Number(row.total || 0), 0);
+    const period = periodInfo(start, end);
+    const repoUserCounts = await query(
+      `
+      SELECT u.id, u.display_name AS name, COUNT(t.id) AS total
+      FROM users u
+      LEFT JOIN repo_tasks t ON t.created_by = u.id AND t.date BETWEEN ? AND ?
+      WHERE u.role = 'reposicao' AND u.status = 'ativo'
+      GROUP BY u.id, u.display_name
+      ORDER BY u.display_name
+      `,
+      [start, end]
+    );
+    const repoActivityCounts = await query(
+      `
+      SELECT activity, COUNT(DISTINCT date) AS total
+      FROM repo_tasks
+      WHERE date BETWEEN ? AND ? AND status = 'Realizado'
+      GROUP BY activity
+      `,
+      [start, end]
+    );
+    const repoActivityMap = new Map(repoActivityCounts.map((row) => [row.activity, Number(row.total || 0)]));
+    const commercialUserCounts = await query(
+      `
+      SELECT u.id, u.display_name AS name, COUNT(x.id) AS total
+      FROM users u
+      LEFT JOIN (
+        SELECT id, commercial_updated_by, date FROM repo_ruptures WHERE commercial_updated_by IS NOT NULL
+        UNION ALL
+        SELECT id, commercial_updated_by, date FROM repo_expirations WHERE commercial_updated_by IS NOT NULL
+      ) x ON x.commercial_updated_by = u.id AND x.date BETWEEN ? AND ?
+      WHERE u.role = 'comercial' AND u.status = 'ativo' ${user.role === "comercial" ? "AND u.id = ?" : ""}
+      GROUP BY u.id, u.display_name
+      ORDER BY u.display_name
+      `,
+      user.role === "comercial" ? [start, end, user.id] : [start, end]
+    );
+    const repoTotalByUsers = repoUserCounts.reduce((sum, row) => sum + Number(row.total || 0), 0);
+    const commercialTotalByUsers = commercialUserCounts.reduce((sum, row) => sum + Number(row.total || 0), 0);
+    return send(res, 200, {
+      summary: {
+        taskTotal,
+        completed,
+        pending: taskTotal - completed,
+        ruptures,
+        rupturesPurchased: ruptureRows.filter((row) => row.commercial_status === "Pedido realizado").reduce((sum, row) => sum + Number(row.total || 0), 0),
+        expirations,
+        expirationsActioned: expirationRows.filter((row) => ["AÃ§Ã£o ou rebaixa realizada", "Acao ou rebaixa realizada"].includes(row.commercial_status)).reduce((sum, row) => sum + Number(row.total || 0), 0),
+        damages: Number(damageRows[0]?.total || 0),
+      },
+      bySector,
+      repoUserEngagement: repoUserCounts.map((row) => ({
+        id: row.id,
+        name: row.name,
+        total: Number(row.total || 0),
+        percent: repoTotalByUsers ? Math.round((Number(row.total || 0) / repoTotalByUsers) * 100) : 0,
+      })),
+      repoActivityCompletion: repoActivities.map((activity) => {
+        const total = repoActivityMap.get(activity) || 0;
+        return {
+          activity,
+          total,
+          expected: period.days,
+          percent: period.days ? Math.min(100, Math.round((total / period.days) * 100)) : 0,
+        };
+      }),
+      commercialUserEngagement: commercialUserCounts.map((row) => ({
+        id: row.id,
+        name: row.name,
+        total: Number(row.total || 0),
+        percent: commercialTotalByUsers ? Math.round((Number(row.total || 0) / commercialTotalByUsers) * 100) : 0,
+      })),
+    });
+  }
+
+  if (method === "GET" && url.pathname === "/api/reposition/tasks") {
+    if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
+    const start = url.searchParams.get("startDate") || today();
+    const end = url.searchParams.get("endDate") || start;
+    return send(res, 200, {
+      rows: await query(
+        `
+        SELECT t.*, c.name AS collaborator
+        FROM repo_tasks t JOIN collaborators c ON c.id = t.collaborator_id
+        WHERE t.date BETWEEN ? AND ?
+        ORDER BY t.date DESC, t.id DESC
+        `,
+        [start, end]
+      ),
+    });
+  }
+
+  if (method === "POST" && url.pathname === "/api/reposition/tasks") {
+    if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
+    const body = await readBody(req);
+    const collaboratorId = user.collaborator_id || body.collaboratorId;
+    if (!collaboratorId) return send(res, 400, { error: "Selecione um colaborador." });
+    const sectorError = await validateRepoSectorForUser(user, body.sector);
+    if (sectorError) return send(res, 403, { error: sectorError });
+    const status = body.answer === "NÃ£o" || body.answer === "Nao" ? "Pendente" : "Realizado";
+    await execute(
+      "INSERT INTO repo_tasks (date, collaborator_id, sector, activity, status, observation, sent_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [body.date || today(), collaboratorId, body.sector, body.activity, status, body.observation || "", nowIso(), user.id]
+    );
+    return send(res, 201, { ok: true });
+  }
+
+  if (method === "GET" && url.pathname === "/api/reposition/ruptures") {
+    if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
+    const filter = await commercialSectorFilter(user);
+    return send(res, 200, { rows: await query(`SELECT * FROM repo_ruptures WHERE 1 = 1${filter.clause} ORDER BY date DESC, id DESC`, filter.params) });
+  }
+
+  if (method === "POST" && url.pathname === "/api/reposition/ruptures") {
+    if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
+    const body = await readBody(req);
+    const sectorError = await validateRepoSectorForUser(user, body.sector);
+    if (sectorError) return send(res, 403, { error: sectorError });
+    await execute(
+      "INSERT INTO repo_ruptures (date, product, sector, type, quantity, observation, sent_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [body.date || today(), body.product, body.sector, body.type || "Ruptura total", body.quantity || "", body.observation || "", nowIso(), user.id]
+    );
+    return send(res, 201, { ok: true });
+  }
+
+  if (method === "PUT" && url.pathname.startsWith("/api/reposition/ruptures/")) {
+    if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
+    if (!canUpdateRepoCommercial(user)) return send(res, 403, { error: "Apenas liderança ou comercial pode atualizar o retorno." });
+    const id = Number(url.pathname.split("/").pop());
+    const body = await readBody(req);
+    const sectorError = await validateCommercialRecordSector(user, "repo_ruptures", id);
+    if (sectorError) return send(res, 403, { error: sectorError });
+    const commercialStatus = ["Pedido realizado", "Pedido nÃ£o realizado", "Pedido nao realizado"].includes(body.commercialStatus) ? body.commercialStatus : "Pendente";
+    await execute(
+      "UPDATE repo_ruptures SET commercial_status = ?, commercial_observation = ?, commercial_updated_by = ?, status = ?, updated_at = ? WHERE id = ?",
+      [commercialStatus, body.commercialObservation || "", user.id, commercialStatus === "Pendente" ? "Aberto" : "Resolvido", nowIso(), id]
+    );
+    return send(res, 200, { ok: true });
+  }
+
+  if (method === "GET" && url.pathname === "/api/reposition/expirations") {
+    if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
+    const filter = await commercialSectorFilter(user);
+    return send(res, 200, { rows: await query(`SELECT * FROM repo_expirations WHERE 1 = 1${filter.clause} ORDER BY date DESC, id DESC`, filter.params) });
+  }
+
+  if (method === "POST" && url.pathname === "/api/reposition/expirations") {
+    if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
+    const body = await readBody(req);
+    const sectorError = await validateRepoSectorForUser(user, body.sector);
+    if (sectorError) return send(res, 403, { error: sectorError });
+    await execute(
+      "INSERT INTO repo_expirations (date, product, sector, expiration_date, quantity, observation, sent_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [body.date || today(), body.product, body.sector, body.expirationDate, body.quantity || "", body.observation || "", nowIso(), user.id]
+    );
+    return send(res, 201, { ok: true });
+  }
+
+  if (method === "PUT" && url.pathname.startsWith("/api/reposition/expirations/")) {
+    if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
+    if (!canUpdateRepoCommercial(user)) return send(res, 403, { error: "Apenas liderança ou comercial pode atualizar o retorno." });
+    const id = Number(url.pathname.split("/").pop());
+    const body = await readBody(req);
+    const sectorError = await validateCommercialRecordSector(user, "repo_expirations", id);
+    if (sectorError) return send(res, 403, { error: sectorError });
+    const commercialStatus = ["AÃ§Ã£o ou rebaixa realizada", "AÃ§Ã£o nÃ£o realizada", "Acao ou rebaixa realizada", "Acao nao realizada"].includes(body.commercialStatus) ? body.commercialStatus : "Pendente";
+    await execute(
+      "UPDATE repo_expirations SET commercial_status = ?, commercial_observation = ?, commercial_updated_by = ?, status = ?, updated_at = ? WHERE id = ?",
+      [commercialStatus, body.commercialObservation || "", user.id, commercialStatus === "Pendente" ? "Aberto" : "Resolvido", nowIso(), id]
+    );
+    return send(res, 200, { ok: true });
+  }
+
+  if (method === "GET" && url.pathname === "/api/reposition/damages") {
+    if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
+    return send(res, 200, { rows: await query("SELECT * FROM repo_damages ORDER BY date DESC, id DESC") });
+  }
+
+  if (method === "POST" && url.pathname === "/api/reposition/damages") {
+    if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
+    const body = await readBody(req);
+    const sectorError = await validateRepoSectorForUser(user, body.sector);
+    if (sectorError) return send(res, 403, { error: sectorError });
+    await execute(
+      "INSERT INTO repo_damages (date, product, sector, quantity, reason, action, sent_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [body.date || today(), body.product, body.sector, body.quantity || "", body.reason || "", body.action || "", nowIso(), user.id]
+    );
+    return send(res, 201, { ok: true });
   }
 
   if (method === "GET" && url.pathname === "/api/users") {
@@ -485,9 +878,9 @@ async function api(req, res, url) {
   if (method === "DELETE" && url.pathname.startsWith("/api/users/")) {
     if (!isAdmin(user)) return send(res, 403, { error: "Apenas administrador pode gerenciar acessos." });
     const id = Number(url.pathname.split("/").pop());
-    if (id === user.id) return send(res, 400, { error: "Você não pode excluir o próprio acesso enquanto está logado." });
+    if (id === user.id) return send(res, 400, { error: "VocÃª nÃ£o pode excluir o prÃ³prio acesso enquanto estÃ¡ logado." });
     await execute("DELETE FROM users WHERE id = ?", [id]);
-    return send(res, 200, { ok: true, message: "Acesso excluído." });
+    return send(res, 200, { ok: true, message: "Acesso excluÃ­do." });
   }
 
   if (method === "GET" && url.pathname === "/api/collaborators") {
@@ -499,21 +892,25 @@ async function api(req, res, url) {
   }
 
   if (method === "POST" && url.pathname === "/api/collaborators") {
+    if (!isAdmin(user)) return send(res, 403, { error: "Apenas administrador pode cadastrar colaboradores." });
     const body = await readBody(req);
-    await execute("INSERT INTO collaborators (name, role, status) VALUES (?, ?, ?)", [
+    await execute("INSERT INTO collaborators (name, role, sector, status) VALUES (?, ?, ?, ?)", [
       body.name,
       body.role,
+      body.sector || "",
       body.status || "ativo",
     ]);
     return send(res, 201, { ok: true });
   }
 
   if (method === "PUT" && url.pathname.startsWith("/api/collaborators/")) {
+    if (!isAdmin(user)) return send(res, 403, { error: "Apenas administrador pode editar colaboradores." });
     const id = Number(url.pathname.split("/").pop());
     const body = await readBody(req);
-    await execute("UPDATE collaborators SET name = ?, role = ?, status = ? WHERE id = ?", [
+    await execute("UPDATE collaborators SET name = ?, role = ?, sector = ?, status = ? WHERE id = ?", [
       body.name,
       body.role,
+      body.sector || "",
       body.status,
       id,
     ]);
@@ -521,6 +918,7 @@ async function api(req, res, url) {
   }
 
   if (method === "DELETE" && url.pathname.startsWith("/api/collaborators/")) {
+    if (!isAdmin(user)) return send(res, 403, { error: "Apenas administrador pode excluir colaboradores." });
     const id = Number(url.pathname.split("/").pop());
     const checklistCount = (await query("SELECT COUNT(*) AS total FROM checklists WHERE collaborator_id = ?", [id]))[0].total;
     const pendencyCount = (await query("SELECT COUNT(*) AS total FROM pendencies WHERE responsible_id = ?", [id]))[0].total;
@@ -530,18 +928,20 @@ async function api(req, res, url) {
       return send(res, 200, {
         ok: true,
         mode: "inactivated",
-        message: "Colaborador possui registros vinculados e foi inativado para preservar o histórico.",
+        message: "Colaborador possui registros vinculados e foi inativado para preservar o histÃ³rico.",
       });
     }
     await execute("DELETE FROM collaborators WHERE id = ?", [id]);
-    return send(res, 200, { ok: true, mode: "deleted", message: "Colaborador excluído." });
+    return send(res, 200, { ok: true, mode: "deleted", message: "Colaborador excluÃ­do." });
   }
 
   if (method === "GET" && url.pathname === "/api/checklists") {
+    if (!canAccessPrevention(user)) return send(res, 403, { error: "Acesso restrito ao módulo de prevenção." });
     return send(res, 200, { rows: await rowsForReports(Object.fromEntries(url.searchParams.entries())) });
   }
 
   if (method === "POST" && url.pathname === "/api/checklists") {
+    if (!canAccessPrevention(user)) return send(res, 403, { error: "Acesso restrito ao módulo de prevenção." });
     const body = await readBody(req);
     const date = today();
     const collaboratorId = user.collaborator_id || body.collaboratorId;
@@ -568,11 +968,12 @@ async function api(req, res, url) {
   }
 
   if (method === "PUT" && url.pathname.startsWith("/api/checklists/")) {
+    if (!canAccessPrevention(user)) return send(res, 403, { error: "Acesso restrito ao módulo de prevenção." });
     const id = Number(url.pathname.split("/").pop());
     const record = (await query("SELECT created_by FROM checklists WHERE id = ?", [id]))[0];
-    if (!record) return send(res, 404, { error: "Preenchimento não encontrado." });
+    if (!record) return send(res, 404, { error: "Preenchimento nÃ£o encontrado." });
     if (!canCorrect(user) && record.created_by !== user.id) {
-      return send(res, 403, { error: "Você só pode corrigir preenchimentos enviados por você." });
+      return send(res, 403, { error: "VocÃª sÃ³ pode corrigir preenchimentos enviados por vocÃª." });
     }
     const body = await readBody(req);
     if (isEncarregadaOnlyActivity(body.activity) && !canFillEncarregadaOnly(user)) {
@@ -598,13 +999,15 @@ async function api(req, res, url) {
   }
 
   if (method === "DELETE" && url.pathname.startsWith("/api/checklists/")) {
+    if (!canAccessPrevention(user)) return send(res, 403, { error: "Acesso restrito ao módulo de prevenção." });
     if (!canDeleteRecords(user)) return send(res, 403, { error: "Apenas administrador pode excluir preenchimentos." });
     const id = Number(url.pathname.split("/").pop());
     await execute("DELETE FROM checklists WHERE id = ?", [id]);
-    return send(res, 200, { ok: true, message: "Preenchimento excluído." });
+    return send(res, 200, { ok: true, message: "Preenchimento excluÃ­do." });
   }
 
   if (method === "GET" && url.pathname === "/api/summaries") {
+    if (!canAccessPrevention(user)) return send(res, 403, { error: "Acesso restrito ao módulo de prevenção." });
     if (!canCorrect(user)) {
       return send(res, 403, { error: "Apenas administrador ou encarregada podem visualizar resumos." });
     }
@@ -615,28 +1018,31 @@ async function api(req, res, url) {
   }
 
   if (method === "GET" && url.pathname === "/api/summary") {
+    if (!canAccessPrevention(user)) return send(res, 403, { error: "Acesso restrito ao módulo de prevenção." });
     const date = url.searchParams.get("date") || today();
     const rows = await query("SELECT * FROM operational_summaries WHERE date = ?", [date]);
     return send(res, 200, { row: rows[0] || null });
   }
 
   if (method === "DELETE" && url.pathname === "/api/summary") {
+    if (!canAccessPrevention(user)) return send(res, 403, { error: "Acesso restrito ao módulo de prevenção." });
     if (!canFillEncarregadaOnly(user)) {
       return send(res, 403, { error: "Apenas a encarregada pode excluir o resumo." });
     }
     const date = url.searchParams.get("date") || today();
     await execute("DELETE FROM operational_summaries WHERE date = ?", [date]);
-    return send(res, 200, { ok: true, message: "Resumo operacional excluído." });
+    return send(res, 200, { ok: true, message: "Resumo operacional excluÃ­do." });
   }
 
   if (method === "POST" && url.pathname === "/api/summary") {
+    if (!canAccessPrevention(user)) return send(res, 403, { error: "Acesso restrito ao módulo de prevenção." });
     if (!canFillEncarregadaOnly(user)) {
       return send(res, 403, { error: "Apenas a encarregada pode salvar o resumo." });
     }
     const body = await readBody(req);
     const existing = (await query("SELECT id FROM operational_summaries WHERE date = ?", [body.date || today()]))[0];
     if (existing && !canCorrect(user)) {
-      return send(res, 403, { error: "Apenas administrador ou encarregada podem corrigir resumo já enviado." });
+      return send(res, 403, { error: "Apenas administrador ou encarregada podem corrigir resumo jÃ¡ enviado." });
     }
     const params = [
       body.date || today(),
@@ -681,6 +1087,7 @@ async function api(req, res, url) {
   }
 
   if (method === "GET" && url.pathname === "/api/dashboard") {
+    if (!canAccessPrevention(user)) return send(res, 403, { error: "Acesso restrito ao módulo de prevenção." });
     const fallback = today();
     const start = url.searchParams.get("startDate") || fallback;
     const end = url.searchParams.get("endDate") || start;
@@ -695,12 +1102,12 @@ async function api(req, res, url) {
         COALESCE(SUM(losses_value),0) AS losses,
         COALESCE(SUM(consumption_value),0) AS consumptions,
         COALESCE(SUM(bottles_count),0) AS bottles,
-        COALESCE(SUM(receipts_count),0) AS receipts,
-        (SELECT COUNT(*) FROM checklists WHERE date BETWEEN ? AND ? AND activity = ? AND expired_products <> '') AS expired,
-        (SELECT COUNT(*) FROM checklists WHERE date BETWEEN ? AND ? AND activity = ? AND price_divergence_products <> '') AS divergences
+        (SELECT COUNT(*) FROM checklists WHERE date BETWEEN ? AND ? AND activity = ?) AS receipts,
+        (SELECT COUNT(*) FROM checklists WHERE date BETWEEN ? AND ? AND activity = ?) AS expired,
+        (SELECT COUNT(*) FROM checklists WHERE date BETWEEN ? AND ? AND activity = ?) AS divergences
       FROM operational_summaries WHERE date BETWEEN ? AND ?
       `,
-      [start, end, EXPIRED_PRODUCTS_ACTIVITY, start, end, PRICE_DIVERGENCE_ACTIVITY, start, end]
+      [start, end, RECEIPTS_ACTIVITY, start, end, EXPIRED_PRODUCTS_ACTIVITY, start, end, PRICE_DIVERGENCE_ACTIVITY, start, end]
     ))[0];
     const completedActivityRows = await query(
       "SELECT DISTINCT date, activity FROM checklists WHERE date BETWEEN ? AND ?",
@@ -721,15 +1128,17 @@ async function api(req, res, url) {
       `,
       [start, end]
     );
-    const activeCollaborators = await query("SELECT id, name FROM collaborators WHERE status = 'ativo' ORDER BY name");
     const collaboratorCounts = await query(
       `
       SELECT col.id, col.name, COUNT(c.id) AS total
-      FROM collaborators col
+      FROM users u
+      JOIN collaborators col ON col.id = u.collaborator_id
       LEFT JOIN checklists c ON c.collaborator_id = col.id
         AND c.date BETWEEN ? AND ?
         AND c.activity NOT IN (?, ?, ?)
       WHERE col.status = 'ativo'
+        AND u.status = 'ativo'
+        AND u.role IN ('prevencao', 'colaborador', 'encarregada')
       GROUP BY col.id, col.name
       ORDER BY col.name
       `,
@@ -775,6 +1184,7 @@ async function api(req, res, url) {
   }
 
   if (method === "GET" && url.pathname === "/api/pendencies") {
+    if (!canAccessPrevention(user)) return send(res, 403, { error: "Acesso restrito ao módulo de prevenção." });
     return send(res, 200, {
       rows: await query(
         `
@@ -787,6 +1197,7 @@ async function api(req, res, url) {
   }
 
   if (method === "POST" && url.pathname === "/api/pendencies") {
+    if (!canAccessPrevention(user)) return send(res, 403, { error: "Acesso restrito ao módulo de prevenção." });
     const body = await readBody(req);
     const attachmentPath = saveDataUrl(body.attachmentData, body.attachmentName);
     await execute(
@@ -797,6 +1208,7 @@ async function api(req, res, url) {
   }
 
   if (method === "PUT" && url.pathname.startsWith("/api/pendencies/")) {
+    if (!canAccessPrevention(user)) return send(res, 403, { error: "Acesso restrito ao módulo de prevenção." });
     const id = Number(url.pathname.split("/").pop());
     const body = await readBody(req);
     const attachmentPath = body.attachmentData ? saveDataUrl(body.attachmentData, body.attachmentName) : body.attachmentPath || null;
@@ -808,6 +1220,7 @@ async function api(req, res, url) {
   }
 
   if (method === "GET" && url.pathname === "/api/reports/export") {
+    if (!canAccessPrevention(user)) return send(res, 403, { error: "Acesso restrito ao módulo de prevenção." });
     const format = url.searchParams.get("format") || "excel";
     const rows = await rowsForReports(Object.fromEntries(url.searchParams.entries()));
     if (format === "pdf") {
@@ -822,14 +1235,14 @@ async function api(req, res, url) {
     });
   }
 
-  return send(res, 404, { error: "Rota não encontrada." });
+  return send(res, 404, { error: "Rota nÃ£o encontrada." });
 }
 
 function serveStatic(req, res, url) {
   let filePath = url.pathname === "/" ? path.join(ROOT, "public", "index.html") : path.join(ROOT, url.pathname);
   if (url.pathname.startsWith("/uploads/")) filePath = path.join(ROOT, url.pathname);
   if (!filePath.startsWith(ROOT) || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-    return send(res, 404, "Arquivo não encontrado", { "Content-Type": "text/plain; charset=utf-8" });
+    return send(res, 404, "Arquivo nÃ£o encontrado", { "Content-Type": "text/plain; charset=utf-8" });
   }
   const ext = path.extname(filePath).toLowerCase();
   const types = {
@@ -842,7 +1255,10 @@ function serveStatic(req, res, url) {
     ".webp": "image/webp",
     ".pdf": "application/pdf",
   };
-  send(res, 200, fs.readFileSync(filePath), { "Content-Type": types[ext] || "application/octet-stream" });
+  send(res, 200, fs.readFileSync(filePath), {
+    "Content-Type": types[ext] || "application/octet-stream",
+    "Cache-Control": "no-store",
+  });
 }
 
 function localNetworkUrls() {
@@ -877,3 +1293,5 @@ start().catch((error) => {
   console.error(error);
   process.exit(1);
 });
+
+

@@ -1,10 +1,13 @@
-const state = {
+﻿const state = {
   token: localStorage.getItem("token") || "",
   user: JSON.parse(localStorage.getItem("user") || "null"),
   tab: "dashboard",
   dashboardFilters: {
+    mode: "day",
+    date: new Date().toISOString().slice(0, 10),
     startDate: new Date().toISOString().slice(0, 10),
     endDate: new Date().toISOString().slice(0, 10),
+    month: new Date().toISOString().slice(0, 7),
   },
   collaborators: [],
   activities: [],
@@ -12,14 +15,30 @@ const state = {
   pendencies: [],
   users: [],
   dashboard: null,
+  repo: {
+    sectors: [],
+    activities: [],
+    repoCollaboratorIds: [],
+    repoUsers: [],
+    commercialUsers: [],
+    dashboard: null,
+    tasks: [],
+    ruptures: [],
+    expirations: [],
+    damages: [],
+    filters: {
+      startDate: new Date().toISOString().slice(0, 10),
+      endDate: new Date().toISOString().slice(0, 10),
+    },
+  },
 };
 
 const app = document.getElementById("app");
-const PRICE_DIVERGENCE_ACTIVITY = "Conferência de precificação";
-const EXPIRED_PRODUCTS_ACTIVITY = "Verificação de validades";
+const PRICE_DIVERGENCE_ACTIVITY = "Confer\u00eancia de precifica\u00e7\u00e3o";
+const EXPIRED_PRODUCTS_ACTIVITY = "Verifica\u00e7\u00e3o de validades";
 const ENCARREGADA_ONLY_ACTIVITIES = [
-  "Lançamento de perdas no sistema",
-  "Lançamento de consumo interno",
+  "Lan\u00e7amento de perdas no sistema",
+  "Lan\u00e7amento de consumo interno",
   "Contagem e acompanhamento de vasilhames",
 ];
 
@@ -34,7 +53,7 @@ function api(path, options = {}) {
   }).then(async (response) => {
     const contentType = response.headers.get("content-type") || "";
     const data = contentType.includes("json") ? await response.json() : await response.blob();
-    if (!response.ok) throw new Error(data.error || "Falha ao processar solicitação.");
+    if (!response.ok) throw new Error(data.error || "Falha ao processar solicitaÃ§Ã£o.");
     return data;
   });
 }
@@ -50,6 +69,16 @@ function fmtDate(value) {
 
 function todayInputValue() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function monthRange(month) {
+  const [year, monthIndex] = String(month || new Date().toISOString().slice(0, 7)).split("-").map(Number);
+  const start = new Date(year, monthIndex - 1, 1);
+  const end = new Date(year, monthIndex, 0);
+  return {
+    startDate: start.toISOString().slice(0, 10),
+    endDate: end.toISOString().slice(0, 10),
+  };
 }
 
 function canCorrect() {
@@ -72,6 +101,14 @@ function canAccessSummary() {
   return ["administrador", "encarregada"].includes(state.user?.role);
 }
 
+function canAccessPrevention() {
+  return ["administrador", "prevencao", "colaborador", "encarregada"].includes(state.user?.role);
+}
+
+function canAccessReposition() {
+  return ["administrador", "reposicao", "comercial"].includes(state.user?.role);
+}
+
 function canFillEncarregadaOnly() {
   return state.user?.role === "encarregada";
 }
@@ -91,11 +128,43 @@ function toast(message) {
 }
 
 function escapeHtml(value) {
-  return String(value ?? "")
+  return normalizeText(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+function normalizeText(value) {
+  const text = String(value ?? "");
+  if (!/[ÃÂ]/.test(text)) return text;
+  try {
+    return decodeURIComponent(escape(text));
+  } catch {
+    return text;
+  }
+}
+
+function fixVisibleText(root = app) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach((node) => {
+    node.nodeValue = normalizeText(node.nodeValue);
+  });
+  root.querySelectorAll("input[placeholder], textarea[placeholder]").forEach((field) => {
+    field.placeholder = normalizeText(field.placeholder);
+  });
+}
+
+function loginAreaMatches(area, role) {
+  const areaRoles = {
+    prevencao: ["prevencao", "colaborador", "encarregada"],
+    reposicao: ["reposicao"],
+    comercial: ["comercial"],
+    administrador: ["administrador"],
+  };
+  return (areaRoles[area] || []).includes(role);
 }
 
 function renderLogin(error = "") {
@@ -103,14 +172,14 @@ function renderLogin(error = "") {
     <section class="login-screen">
       <form class="login-panel" id="loginForm">
         <div class="brand">
-          <div class="brand-mark">PP</div>
+          <div class="brand-mark">CA</div>
           <div>
-            <h1>Prevenção de Perdas</h1>
-            <div class="muted">Atacarejo Antônio de Ozório</div>
+            <h1>Controle Atacarejo</h1>
+            <div class="muted">Atacarejo AntÃ´nio de OzÃ³rio</div>
           </div>
         </div>
         <div class="grid">
-          <label>Usuário
+          <label>UsuÃ¡rio
             <input name="username" autocomplete="username" required>
           </label>
           <label>Senha
@@ -122,11 +191,33 @@ function renderLogin(error = "") {
       </form>
     </section>
   `;
-  document.getElementById("loginForm").addEventListener("submit", async (event) => {
+  const loginForm = document.getElementById("loginForm");
+  loginForm.querySelector("h1").textContent = "Controle Atacarejo";
+  loginForm.querySelector(".brand .muted").textContent = "Atacarejo AntÃ´nio de OzÃ³rio";
+  loginForm.querySelector('input[name="username"]').closest("label").insertAdjacentHTML("beforebegin", `
+    <label>Ãrea de acesso
+      <select name="accessArea" required>
+        <option value="prevencao">PrevenÃ§Ã£o de perdas</option>
+        <option value="reposicao">ReposiÃ§Ã£o da loja</option>
+        <option value="comercial">Comercial</option>
+        <option value="administrador">Administrador</option>
+      </select>
+    </label>
+  `);
+  loginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.currentTarget).entries());
     try {
       const data = await api("/api/login", { method: "POST", body: JSON.stringify(body) });
+      if (!loginAreaMatches(body.accessArea, data.user.role)) {
+        const labels = {
+          prevencao: "PrevenÃ§Ã£o de perdas",
+          reposicao: "ReposiÃ§Ã£o da loja",
+          comercial: "Comercial",
+          administrador: "Administrador",
+        };
+        return renderLogin(`Este usuÃ¡rio nÃ£o pertence ao acesso ${labels[body.accessArea] || "selecionado"}.`);
+      }
       state.token = data.token;
       state.user = data.user;
       localStorage.setItem("token", data.token);
@@ -136,6 +227,7 @@ function renderLogin(error = "") {
       renderLogin(err.message);
     }
   });
+  fixVisibleText(app);
 }
 
 async function bootstrap() {
@@ -144,8 +236,18 @@ async function bootstrap() {
     const me = await api("/api/me");
     state.user = me.user;
     state.activities = me.activities;
+    if (canAccessReposition()) {
+      const repoOptions = await api("/api/reposition/options");
+      state.repo.sectors = repoOptions.sectors;
+      state.repo.activities = repoOptions.activities;
+      state.repo.repoCollaboratorIds = repoOptions.repoCollaboratorIds || [];
+      state.repo.repoUsers = repoOptions.repoUsers || [];
+      state.repo.commercialUsers = repoOptions.commercialUsers || [];
+    }
     state.tab = defaultTab();
-    await Promise.all([loadCollaborators(), loadDashboard()]);
+    await loadCollaborators();
+    if (state.tab === "dashboard") await loadDashboard();
+    if (state.tab === "reposition" || state.tab === "repoDashboard" || state.tab === "commercial" || state.tab === "commercialDashboard") await loadReposition();
     renderShell();
   } catch {
     logout();
@@ -167,10 +269,10 @@ function renderShell() {
     <section class="app-shell">
       <aside class="sidebar">
         <div class="brand">
-          <div class="brand-mark">PP</div>
+          <div class="brand-mark">CA</div>
           <div>
-            <h3>Atacarejo Antônio de Ozório</h3>
-            <div class="muted">${escapeHtml(state.user.display_name)} · ${escapeHtml(state.user.role)}</div>
+            <h3>Controle Atacarejo</h3>
+            <div class="muted">${escapeHtml(state.user.display_name)} Â· ${escapeHtml(state.user.role)}</div>
           </div>
         </div>
         <nav class="nav">
@@ -196,7 +298,9 @@ function renderShell() {
 
 async function refreshForTab() {
   if (state.tab === "dashboard") await loadDashboard();
+  if (state.tab === "repoDashboard" || state.tab === "commercialDashboard") await Promise.all([loadCollaborators(), loadReposition()]);
   if (state.tab === "collaborators" || state.tab === "checklist" || state.tab === "pendencies") await loadCollaborators();
+  if (state.tab === "reposition" || state.tab === "commercial") await Promise.all([loadCollaborators(), loadReposition()]);
   if (state.tab === "reports") await loadChecklists();
   if (state.tab === "pendencies") await loadPendencies();
   if (state.tab === "users") await Promise.all([loadUsers(), loadCollaborators()]);
@@ -205,32 +309,44 @@ async function refreshForTab() {
 function renderView() {
   const map = {
     dashboard: renderDashboard,
+    repoDashboard: renderRepoDashboard,
+    commercialDashboard: renderCommercialDashboard,
     checklist: renderChecklist,
     summary: renderSummary,
     reports: renderReports,
+    reposition: renderReposition,
+    commercial: renderCommercial,
     pendencies: renderPendencies,
     collaborators: renderCollaborators,
     users: renderUsers,
   };
   map[state.tab]();
+  fixVisibleText(app);
 }
 
 function allowedTabs() {
+  if (state.user?.role === "reposicao") return [["repoDashboard", "Painel Reposi\u00e7\u00e3o"], ["reposition", "Reposi\u00e7\u00e3o"]];
+  if (state.user?.role === "comercial") return [["commercialDashboard", "Painel Comercial"], ["commercial", "Comercial"]];
   if (state.user?.role !== "administrador") {
     const tabs = [
-      ["dashboard", "Painel"],
+      ["dashboard", "Painel PrevenÃ§Ã£o"],
       ["checklist", "Checklist"],
-      ["pendencies", "Pendências"],
+      ["reposition", "ReposiÃ§Ã£o"],
+      ["pendencies", "PendÃªncias"],
     ];
     if (canAccessSummary()) tabs.splice(2, 0, ["summary", "Resumo"]);
-    return tabs;
+    return tabs.filter(([id]) => id !== "reposition");
   }
   const tabs = [
-    ["dashboard", "Painel"],
+    ["dashboard", "Painel PrevenÃ§Ã£o"],
+    ["repoDashboard", "Painel Reposi\u00e7\u00e3o"],
+    ["commercialDashboard", "Painel Comercial"],
     ["checklist", "Checklist"],
+    ["reposition", "ReposiÃ§Ã£o"],
+    ["commercial", "Comercial"],
     ["summary", "Resumo"],
-    ["reports", "Relatórios"],
-    ["pendencies", "Pendências"],
+    ["reports", "RelatÃ³rios"],
+    ["pendencies", "PendÃªncias"],
     ["collaborators", "Colaboradores"],
   ];
   tabs.push(["users", "Acessos"]);
@@ -238,6 +354,8 @@ function allowedTabs() {
 }
 
 function defaultTab() {
+  if (state.user?.role === "reposicao") return "repoDashboard";
+  if (state.user?.role === "comercial") return "commercialDashboard";
   return "dashboard";
 }
 
@@ -247,7 +365,20 @@ async function loadCollaborators() {
 }
 
 async function loadDashboard() {
-  const qs = new URLSearchParams(state.dashboardFilters);
+  const filters = state.dashboardFilters;
+  let range;
+  if (filters.mode === "month") {
+    range = monthRange(filters.month);
+  } else if (filters.mode === "period") {
+    range = {
+      startDate: filters.startDate || filters.date || todayInputValue(),
+      endDate: filters.endDate || filters.startDate || filters.date || todayInputValue(),
+    };
+  } else {
+    const date = filters.date || todayInputValue();
+    range = { startDate: date, endDate: date };
+  }
+  const qs = new URLSearchParams(range);
   const data = await api(`/api/dashboard?${qs.toString()}`);
   state.dashboard = data;
 }
@@ -267,6 +398,22 @@ async function loadUsers() {
   state.users = data.rows;
 }
 
+async function loadReposition() {
+  const qs = new URLSearchParams(state.repo.filters);
+  const [dashboard, tasks, ruptures, expirations, damages] = await Promise.all([
+    api(`/api/reposition/dashboard?${qs.toString()}`),
+    api(`/api/reposition/tasks?${qs.toString()}`),
+    api("/api/reposition/ruptures"),
+    api("/api/reposition/expirations"),
+    api("/api/reposition/damages"),
+  ]);
+  state.repo.dashboard = dashboard;
+  state.repo.tasks = tasks.rows;
+  state.repo.ruptures = ruptures.rows;
+  state.repo.expirations = expirations.rows;
+  state.repo.damages = damages.rows;
+}
+
 function renderDashboard() {
   const data = state.dashboard || {
     summary: {},
@@ -277,15 +424,15 @@ function renderDashboard() {
     pendingToday: 0,
   };
   const summary = data.summary || {};
-  const monthLabel = data.month?.label || "mês atual";
+  const monthLabel = data.month?.label || "mÃªs atual";
   const metrics = [
     ["Checklists pendentes", data.pendingToday || 0],
-    ["Perdas lançadas", fmtMoney(summary.losses)],
+    ["Perdas lanÃ§adas", fmtMoney(summary.losses)],
     ["Consumos internos", fmtMoney(summary.consumptions)],
     ["Contagem de vasilhames", summary.bottles || 0],
     ["Recebimentos", summary.receipts || 0],
     ["Produtos vencidos", summary.expired || 0],
-    ["Divergências de preço", summary.divergences || 0],
+    ["DivergÃªncias de preÃ§o", summary.divergences || 0],
     ["Dias com checklist", data.totalsByDay.length],
   ];
   const max = Math.max(...data.totalsByDay.map((row) => row.total), 1);
@@ -293,7 +440,7 @@ function renderDashboard() {
     <div class="topbar">
       <div>
         <h2>Dashboard gerencial</h2>
-        <div class="muted">Indicadores operacionais do período registrado e percentuais de ${escapeHtml(monthLabel)}</div>
+        <div class="muted">Indicadores operacionais do perÃ­odo registrado e percentuais de ${escapeHtml(monthLabel)}</div>
       </div>
       <div class="toolbar">
         <button class="btn" id="exportDashboardPdf">PDF</button>
@@ -302,11 +449,20 @@ function renderDashboard() {
       </div>
     </div>
     <form class="panel grid" id="dashboardFilterForm" style="margin-bottom:14px">
-      <div class="grid two">
-        <label>Data inicial <input name="startDate" type="date" value="${escapeHtml(state.dashboardFilters.startDate)}"></label>
-        <label>Data final <input name="endDate" type="date" value="${escapeHtml(state.dashboardFilters.endDate)}"></label>
+      <div class="grid four">
+        <label>Visualizar
+          <select name="mode">
+            <option value="day" ${state.dashboardFilters.mode === "day" ? "selected" : ""}>Dia</option>
+            <option value="period" ${state.dashboardFilters.mode === "period" ? "selected" : ""}>PerÃ­odo</option>
+            <option value="month" ${state.dashboardFilters.mode === "month" ? "selected" : ""}>MÃªs</option>
+          </select>
+        </label>
+        <label data-dashboard-day>Data <input name="date" type="date" value="${escapeHtml(state.dashboardFilters.date)}"></label>
+        <label data-dashboard-period>InÃ­cio <input name="startDate" type="date" value="${escapeHtml(state.dashboardFilters.startDate)}"></label>
+        <label data-dashboard-period>Fim <input name="endDate" type="date" value="${escapeHtml(state.dashboardFilters.endDate)}"></label>
+        <label data-dashboard-month>MÃªs <input name="month" type="month" value="${escapeHtml(state.dashboardFilters.month)}"></label>
       </div>
-      <button class="btn primary" type="submit">Aplicar período</button>
+      <button class="btn primary" type="submit">Aplicar filtro</button>
     </form>
     <div class="metrics">${metrics.map(([label, value]) => `<div class="metric"><span class="muted">${label}</span><strong>${value}</strong></div>`).join("")}</div>
     <div class="grid two" style="margin-top:14px">
@@ -319,10 +475,10 @@ function renderDashboard() {
         </div>
       </section>
       <section class="panel">
-        <h3>Ocorrências por colaborador</h3>
+        <h3>OcorrÃªncias por colaborador</h3>
         <div class="table-wrap" style="margin-top:12px">
-          <table><thead><tr><th>Colaborador</th><th>Ocorrências</th></tr></thead><tbody>
-            ${data.byCollaborator.map((row) => `<tr><td data-label="Colaborador">${escapeHtml(row.name)}</td><td data-label="Ocorrências">${row.total}</td></tr>`).join("") || `<tr><td colspan="2">Sem ocorrências.</td></tr>`}
+          <table><thead><tr><th>Colaborador</th><th>OcorrÃªncias</th></tr></thead><tbody>
+            ${data.byCollaborator.map((row) => `<tr><td data-label="Colaborador">${escapeHtml(row.name)}</td><td data-label="OcorrÃªncias">${row.total}</td></tr>`).join("") || `<tr><td colspan="2">Sem ocorrÃªncias.</td></tr>`}
           </tbody></table>
         </div>
       </section>
@@ -330,7 +486,7 @@ function renderDashboard() {
     <div class="grid two" style="margin-top:14px">
       <section class="panel">
         <h3>Engajamento por colaborador</h3>
-        <div class="muted" style="margin-top:4px">Participação nos preenchimentos do mês, sem considerar perdas, consumos e vasilhames</div>
+        <div class="muted" style="margin-top:4px">ParticipaÃ§Ã£o nos preenchimentos do mÃªs, sem considerar perdas, consumos e vasilhames</div>
         <div class="table-wrap" style="margin-top:12px">
           <table><thead><tr><th>Colaborador</th><th>Preenchimentos</th><th>Engajamento</th></tr></thead><tbody>
             ${data.collaboratorCompletion.map((row) => `
@@ -344,8 +500,8 @@ function renderDashboard() {
         </div>
       </section>
       <section class="panel">
-        <h3>Percentual de realização das atividades</h3>
-        <div class="muted" style="margin-top:4px">Meta: dias do mês; conta o dia quando a atividade foi registrada ao menos uma vez</div>
+        <h3>Percentual de realizaÃ§Ã£o das atividades</h3>
+        <div class="muted" style="margin-top:4px">Meta: dias do mÃªs; conta o dia quando a atividade foi registrada ao menos uma vez</div>
         <div class="table-wrap" style="margin-top:12px">
           <table><thead><tr><th>Atividade</th><th>Realizado</th><th>Percentual</th></tr></thead><tbody>
             ${data.activityCompletion.map((row) => `
@@ -364,7 +520,16 @@ function renderDashboard() {
     await loadDashboard();
     renderDashboard();
   });
-  document.getElementById("dashboardFilterForm").addEventListener("submit", async (event) => {
+  const dashboardFilterForm = document.getElementById("dashboardFilterForm");
+  const syncDashboardMode = () => {
+    const mode = dashboardFilterForm.mode.value;
+    dashboardFilterForm.querySelectorAll("[data-dashboard-day]").forEach((item) => item.classList.toggle("hidden", mode !== "day"));
+    dashboardFilterForm.querySelectorAll("[data-dashboard-period]").forEach((item) => item.classList.toggle("hidden", mode !== "period"));
+    dashboardFilterForm.querySelectorAll("[data-dashboard-month]").forEach((item) => item.classList.toggle("hidden", mode !== "month"));
+  };
+  dashboardFilterForm.mode.addEventListener("change", syncDashboardMode);
+  syncDashboardMode();
+  dashboardFilterForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     state.dashboardFilters = Object.fromEntries(new FormData(event.currentTarget).entries());
     await loadDashboard();
@@ -387,11 +552,11 @@ function percentBar(percent) {
 function exportDashboardCsv() {
   const data = state.dashboard || {};
   const lines = [
-    ["Relatório do painel", data.month?.label || ""],
+    ["RelatÃ³rio do painel", data.month?.label || ""],
     [],
     ["Indicador", "Valor"],
     ["Checklists pendentes", data.pendingToday || 0],
-    ["Perdas lançadas", data.summary?.losses || 0],
+    ["Perdas lanÃ§adas", data.summary?.losses || 0],
     ["Consumos internos", data.summary?.consumptions || 0],
     ["Contagem de vasilhames", data.summary?.bottles || 0],
     ["Recebimentos", data.summary?.receipts || 0],
@@ -400,7 +565,7 @@ function exportDashboardCsv() {
     ["Colaborador", "Preenchimentos", "Percentual"],
     ...(data.collaboratorCompletion || []).map((row) => [row.name, row.total, `${row.percent}%`]),
     [],
-    ["Realização das atividades"],
+    ["RealizaÃ§Ã£o das atividades"],
     ["Atividade", "Realizado", "Meta", "Percentual"],
     ...(data.activityCompletion || []).map((row) => [row.activity, row.total, row.expected, `${row.percent}%`]),
   ];
@@ -425,6 +590,78 @@ function collaboratorOptions(activeOnly = true) {
     .join("");
 }
 
+function repoCollaboratorOptions() {
+  const allowed = new Set((state.repo.repoCollaboratorIds || []).map((id) => Number(id)));
+  const rows = state.collaborators.filter((item) => (
+    item.status === "ativo"
+    && !isCommercialCollaborator(item)
+    && (allowed.has(Number(item.id)) || collaboratorSectors(item).length > 0)
+  ));
+  if (!rows.length) return `<option value="">Cadastre e vincule usuÃ¡rios de reposiÃ§Ã£o</option>`;
+  return rows
+    .map((item) => `<option value="${item.id}">${escapeHtml(item.name)} - ${escapeHtml(item.role)}</option>`)
+    .join("");
+}
+
+function isCommercialCollaborator(collaborator) {
+  const role = normalizeText(collaborator?.role || "").toLowerCase();
+  return role.includes("comprador") || role.includes("compradora") || role.includes("comercial");
+}
+
+function collaboratorSectors(collaborator) {
+  const value = collaborator?.sector || "";
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map((item) => normalizeText(item).trim()).filter(Boolean);
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) return parsed.map((item) => normalizeText(item).trim()).filter(Boolean);
+  } catch (error) {
+    // Mantem compatibilidade com cadastros antigos que tinham apenas um setor em texto.
+  }
+  return String(value).split("||").map((item) => normalizeText(item).trim()).filter(Boolean);
+}
+
+function displayCollaboratorSectors(collaborator) {
+  const sectors = collaboratorSectors(collaborator);
+  return sectors.length ? sectors.join(", ") : "-";
+}
+
+function collaboratorSectorCheckboxes(selected = []) {
+  const selectedSet = new Set(Array.isArray(selected) ? selected : [selected].filter(Boolean));
+  return (state.repo.sectors || []).map((sector) => `
+    <label class="check-option">
+      <input type="checkbox" name="sector" value="${escapeHtml(sector)}" ${selectedSet.has(sector) ? "checked" : ""}>
+      <span>${escapeHtml(sector)}</span>
+    </label>
+  `).join("");
+}
+
+function repoTaskSectorOptions(collaborator) {
+  const assigned = collaboratorSectors(collaborator);
+  if (
+    state.user?.role === "reposicao"
+    && collaborator
+    && Number(collaborator.id) === Number(state.user.collaborator_id)
+  ) {
+    return assigned.length ? repoOptions(assigned) : `<option value="">Nenhum setor atribuido</option>`;
+  }
+  const sectors = assigned.length ? assigned : state.repo.sectors;
+  return repoOptions(sectors || []);
+}
+
+function repoSectorsForCurrentUser() {
+  if (state.user?.role !== "reposicao" || !state.user?.collaborator_id) return state.repo.sectors || [];
+  const collaborator = state.collaborators.find((item) => Number(item.id) === Number(state.user.collaborator_id));
+  const assigned = collaboratorSectors(collaborator);
+  return assigned;
+}
+
+function repoSectorOptionsForCurrentUser() {
+  const sectors = repoSectorsForCurrentUser();
+  if (state.user?.role === "reposicao" && !sectors.length) return `<option value="">Nenhum setor atribuido</option>`;
+  return repoOptions(sectors);
+}
+
 function renderChecklist() {
   const availableActivities = checklistActivitiesForUser();
   const linkedCollaborator = state.user?.collaborator_id
@@ -445,8 +682,8 @@ function renderChecklist() {
   view.innerHTML = `
     <div class="topbar">
       <div>
-        <h2>Checklist diário</h2>
-        <div class="muted">${linkedCollaborator ? "Acesso vinculado ao seu cadastro" : "Data e horário são registrados automaticamente no envio"}</div>
+        <h2>Checklist diÃ¡rio</h2>
+        <div class="muted">${linkedCollaborator ? "Acesso vinculado ao seu cadastro" : "Data e horÃ¡rio sÃ£o registrados automaticamente no envio"}</div>
       </div>
     </div>
     <form class="panel grid" id="checklistForm">
@@ -457,13 +694,13 @@ function renderChecklist() {
         </label>
       </div>
       <div class="grid two">
-        <label>Sim / Não
-          <select name="answer" required><option>Sim</option><option>Não</option></select>
+        <label>Sim / NÃ£o
+          <select name="answer" required><option>Sim</option><option>NÃ£o</option></select>
         </label>
-        <label data-price-divergence-field>Produtos com divergência de preços <textarea name="priceDivergenceProducts"></textarea></label>
+        <label data-price-divergence-field>Produtos com divergÃªncia de preÃ§os <textarea name="priceDivergenceProducts"></textarea></label>
       </div>
       <label data-expired-products-field>Produtos vencidos encontrados <textarea name="expiredProducts"></textarea></label>
-      <label>Observação
+      <label>ObservaÃ§Ã£o
         <textarea name="observation"></textarea>
       </label>
       <button class="btn primary" type="submit">Enviar checklist</button>
@@ -502,16 +739,16 @@ function renderSummary() {
   view.innerHTML = `
     <div class="topbar">
       <div>
-        <h2>Resumo operacional diário</h2>
-        <div class="muted">Consolidação do dia para acompanhamento gerencial</div>
+        <h2>Resumo operacional diÃ¡rio</h2>
+        <div class="muted">ConsolidaÃ§Ã£o do dia para acompanhamento gerencial</div>
       </div>
     </div>
     ${summaryLocked ? `<div class="panel muted" style="margin-bottom:14px">Somente a encarregada pode preencher, alterar ou excluir perdas, consumos e vasilhames.</div>` : ""}
     <form class="panel grid" id="summaryForm">
       <div class="grid three">
         <label>Data do resumo <input name="date" type="date" required value="${todayInputValue()}"></label>
-        <label>Valor das perdas lançadas <input name="lossesValue" type="number" step="0.01" min="0"></label>
-        <label>Valor dos consumos lançados <input name="consumptionValue" type="number" step="0.01" min="0"></label>
+        <label>Valor das perdas lanÃ§adas <input name="lossesValue" type="number" step="0.01" min="0"></label>
+        <label>Valor dos consumos lanÃ§ados <input name="consumptionValue" type="number" step="0.01" min="0"></label>
       </div>
       <div class="grid four">
         <label>Contagem de vasilhames do dia <input name="bottlesCount" type="number" min="0"></label>
@@ -521,8 +758,8 @@ function renderSummary() {
         <textarea name="bottlesDetails" placeholder="Ex.: garrafa 1L, garrafa 2L, caixas, engradados"></textarea>
       </label>
       <div class="grid two">
-        <label>Ocorrências identificadas <textarea name="occurrences"></textarea></label>
-        <label>Ações corretivas realizadas <textarea name="correctiveActions"></textarea></label>
+        <label>OcorrÃªncias identificadas <textarea name="occurrences"></textarea></label>
+        <label>AÃ§Ãµes corretivas realizadas <textarea name="correctiveActions"></textarea></label>
       </div>
       <div class="toolbar">
         <button class="btn primary" type="submit" ${summaryLocked ? "disabled" : ""}>Salvar / corrigir resumo</button>
@@ -562,7 +799,7 @@ function renderSummary() {
   const loadSummaryForDate = async () => {
     const data = await api(`/api/summary?date=${encodeURIComponent(form.date.value)}`);
     fillSummaryForm(data.row);
-    toast(data.row ? "Resumo carregado para edição." : "Nenhum resumo encontrado para essa data.");
+    toast(data.row ? "Resumo carregado para ediÃ§Ã£o." : "Nenhum resumo encontrado para essa data.");
   };
   const refreshSummaryTable = async () => {
     const data = await api("/api/summaries");
@@ -576,7 +813,7 @@ function renderSummary() {
             <th>Vasilhames</th>
             <th>Qual vasilhame</th>
             <th>Recebimentos</th>
-            <th>Ações</th>
+            <th>AÃ§Ãµes</th>
           </tr>
         </thead>
         <tbody>
@@ -588,14 +825,14 @@ function renderSummary() {
               <td data-label="Vasilhames">${row.bottles_count || 0}</td>
               <td data-label="Qual vasilhame">${escapeHtml(row.bottles_details || "")}</td>
               <td data-label="Recebimentos">${row.receipts_count || 0}</td>
-              <td data-label="Ações">
+              <td data-label="AÃ§Ãµes">
                 <div class="toolbar">
                   <button class="btn" type="button" data-edit-summary="${row.date}">Editar</button>
                   ${canFillEncarregadaOnly() ? `<button class="btn danger" type="button" data-delete-summary="${row.date}">Excluir</button>` : ""}
                 </div>
               </td>
             </tr>
-          `).join("") || `<tr><td colspan="7">Nenhum resumo lançado.</td></tr>`}
+          `).join("") || `<tr><td colspan="7">Nenhum resumo lanÃ§ado.</td></tr>`}
         </tbody>
       </table>
     `;
@@ -615,7 +852,7 @@ function renderSummary() {
         if (form.date.value === date) clearSummaryFields();
         await loadDashboard();
         await refreshSummaryTable();
-        toast(result.message || "Resumo excluído.");
+        toast(result.message || "Resumo excluÃ­do.");
       });
     });
   };
@@ -628,7 +865,7 @@ function renderSummary() {
     clearSummaryFields();
     await loadDashboard();
     await refreshSummaryTable();
-    toast(result.message || "Resumo excluído.");
+    toast(result.message || "Resumo excluÃ­do.");
   });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -646,7 +883,7 @@ function reportFiltersHtml() {
   return `
     <div class="grid four">
       <label>Data <input name="date" type="date"></label>
-      <label>Início <input name="startDate" type="date"></label>
+      <label>InÃ­cio <input name="startDate" type="date"></label>
       <label>Fim <input name="endDate" type="date"></label>
       <label>Colaborador <select name="collaboratorId"><option value="">Todos</option>${collaboratorOptions(false)}</select></label>
     </div>
@@ -658,8 +895,8 @@ function renderReports() {
   view.innerHTML = `
     <div class="topbar">
       <div>
-        <h2>Relatórios</h2>
-        <div class="muted">Filtros por data, colaborador, período e atividade</div>
+        <h2>RelatÃ³rios</h2>
+        <div class="muted">Filtros por data, colaborador, perÃ­odo e atividade</div>
       </div>
       <div class="toolbar">
         <button class="btn" id="exportPdf">PDF</button>
@@ -688,17 +925,17 @@ function renderReports() {
 function drawReportTable() {
   const showActions = state.checklists.some((row) => canEditChecklist(row) || canDeleteChecklist());
   document.getElementById("reportTable").innerHTML = `
-    <table><thead><tr><th>Data</th><th>Colaborador</th><th>Atividade</th><th>Resposta</th><th>Observação</th><th>Enviado em</th>${showActions ? "<th>Ações</th>" : ""}</tr></thead><tbody>
+    <table><thead><tr><th>Data</th><th>Colaborador</th><th>Atividade</th><th>Resposta</th><th>ObservaÃ§Ã£o</th><th>Enviado em</th>${showActions ? "<th>AÃ§Ãµes</th>" : ""}</tr></thead><tbody>
       ${state.checklists.map((row) => `
         <tr>
           <td data-label="Data">${fmtDate(row.date)}</td>
           <td data-label="Colaborador">${escapeHtml(row.collaborator)}</td>
           <td data-label="Atividade">${escapeHtml(row.activity)}</td>
           <td data-label="Resposta"><span class="status ${row.answer === "Sim" ? "ok" : "danger"}">${row.answer}</span></td>
-          <td data-label="Observação">${escapeHtml(row.observation || "")}</td>
+          <td data-label="ObservaÃ§Ã£o">${escapeHtml(row.observation || "")}</td>
           <td data-label="Enviado em">${new Date(row.sent_at).toLocaleString("pt-BR")}</td>
           ${showActions ? `
-            <td data-label="Ações">
+            <td data-label="AÃ§Ãµes">
               <div class="toolbar">
                 ${canEditChecklist(row) ? `<button class="btn" type="button" data-edit-checklist="${row.id}">Editar</button>` : ""}
                 ${canDeleteChecklist() ? `<button class="btn danger" type="button" data-delete-checklist="${row.id}">Excluir</button>` : ""}
@@ -734,11 +971,11 @@ async function exportReport(format, form) {
 
 function editChecklist(id) {
   const row = state.checklists.find((item) => item.id === id);
-  const answer = prompt("Resposta corrigida: Sim ou Não", row.answer);
+  const answer = prompt("Resposta corrigida: Sim ou NÃ£o", row.answer);
   if (!answer) return;
-  const observation = prompt("Observação corrigida", row.observation || "") || "";
+  const observation = prompt("ObservaÃ§Ã£o corrigida", row.observation || "") || "";
   const priceDivergenceProducts = row.activity === PRICE_DIVERGENCE_ACTIVITY
-    ? prompt("Produtos com divergência de preços", row.price_divergence_products || "") || ""
+    ? prompt("Produtos com divergÃªncia de preÃ§os", row.price_divergence_products || "") || ""
     : "";
   const expiredProducts = row.activity === EXPIRED_PRODUCTS_ACTIVITY
     ? prompt("Produtos vencidos encontrados", row.expired_products || "") || ""
@@ -769,26 +1006,405 @@ async function deleteChecklist(id) {
   await loadChecklists();
   drawReportTable();
   await loadDashboard();
-  toast(result.message || "Preenchimento excluído.");
+  toast(result.message || "Preenchimento excluÃ­do.");
+}
+
+function repoOptions(items, selected = "") {
+  return items.map((item) => `<option ${item === selected ? "selected" : ""}>${escapeHtml(item)}</option>`).join("");
+}
+
+function renderCommercial() {
+  view.innerHTML = `
+    <div class="topbar">
+      <div>
+        <h2>Comercial</h2>
+        <div class="muted">Retorno de rupturas, compras, acoes e rebaixas de validade</div>
+      </div>
+      <button class="btn" id="refreshCommercial">Atualizar</button>
+    </div>
+    <section class="panel">
+      <h3>Retornos pendentes e resolvidos</h3>
+      <div class="table-wrap" style="margin-top:12px">${repoCommercialTable()}</div>
+    </section>
+  `;
+  document.getElementById("refreshCommercial").addEventListener("click", async () => {
+    await loadReposition();
+    renderCommercial();
+  });
+  bindRepoCommercialButtons();
+}
+
+function renderRepoDashboard() {
+  const data = state.repo.dashboard || { summary: {}, bySector: [] };
+  const summary = data.summary || {};
+  const metrics = [
+    ["Atividades", summary.taskTotal || 0],
+    ["Realizadas", summary.completed || 0],
+    ["Pendentes", summary.pending || 0],
+    ["Rupturas", summary.ruptures || 0],
+    ["Validades", summary.expirations || 0],
+    ["Avarias", summary.damages || 0],
+  ];
+  view.innerHTML = `
+    <div class="topbar">
+      <div>
+        <h2>Painel Reposição</h2>
+        <div class="muted">Indicadores de checklists, setores e realização das atividades da reposição</div>
+      </div>
+      <button class="btn" id="refreshRepoDashboard">Atualizar</button>
+    </div>
+    <form class="panel grid" id="repoDashboardFilterForm" style="margin-bottom:14px">
+      <div class="grid two">
+        <label>Início <input name="startDate" type="date" value="${escapeHtml(state.repo.filters.startDate)}"></label>
+        <label>Fim <input name="endDate" type="date" value="${escapeHtml(state.repo.filters.endDate)}"></label>
+      </div>
+      <button class="btn primary" type="submit">Aplicar período</button>
+    </form>
+    <div class="metrics">${metrics.map(([label, value]) => `<div class="metric"><span class="muted">${label}</span><strong>${value}</strong></div>`).join("")}</div>
+    <div class="grid two" style="margin-top:14px">
+      <section class="panel">
+        <h3>Indicadores por setor</h3>
+        <div class="table-wrap" style="margin-top:12px">${repoSectorTable(data.bySector || [])}</div>
+      </section>
+      <section class="panel">
+        <h3>Engajamento da reposição</h3>
+        <div class="muted" style="margin-top:4px">Participação dos usuários de reposição nos checklists do período</div>
+        <div class="table-wrap" style="margin-top:12px">${repoUserEngagementTable(data.repoUserEngagement || [])}</div>
+      </section>
+    </div>
+    <section class="panel" style="margin-top:14px">
+      <h3>Percentual de realização das atividades da reposição</h3>
+      <div class="muted" style="margin-top:4px">Conta o dia quando a atividade foi marcada como Sim ao menos uma vez</div>
+      <div class="table-wrap" style="margin-top:12px">${repoActivityCompletionTable(data.repoActivityCompletion || [])}</div>
+    </section>
+  `;
+  document.getElementById("refreshRepoDashboard").addEventListener("click", async () => {
+    await loadReposition();
+    renderRepoDashboard();
+  });
+  document.getElementById("repoDashboardFilterForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    state.repo.filters = Object.fromEntries(new FormData(event.currentTarget).entries());
+    await loadReposition();
+    renderRepoDashboard();
+  });
+}
+
+function renderCommercialDashboard() {
+  const data = state.repo.dashboard || { summary: {} };
+  const summary = data.summary || {};
+  const metrics = [
+    ["Rupturas", summary.ruptures || 0],
+    ["Pedidos confirmados", summary.rupturesPurchased || 0],
+    ["Validades", summary.expirations || 0],
+    ["Validades com ação", summary.expirationsActioned || 0],
+  ];
+  view.innerHTML = `
+    <div class="topbar">
+      <div>
+        <h2>Painel Comercial</h2>
+        <div class="muted">Engajamento dos compradores e retornos comerciais registrados</div>
+      </div>
+      <button class="btn" id="refreshCommercialDashboard">Atualizar</button>
+    </div>
+    <form class="panel grid" id="commercialDashboardFilterForm" style="margin-bottom:14px">
+      <div class="grid two">
+        <label>Início <input name="startDate" type="date" value="${escapeHtml(state.repo.filters.startDate)}"></label>
+        <label>Fim <input name="endDate" type="date" value="${escapeHtml(state.repo.filters.endDate)}"></label>
+      </div>
+      <button class="btn primary" type="submit">Aplicar período</button>
+    </form>
+    <div class="metrics">${metrics.map(([label, value]) => `<div class="metric"><span class="muted">${label}</span><strong>${value}</strong></div>`).join("")}</div>
+    <div class="grid two" style="margin-top:14px">
+      <section class="panel">
+        <h3>Engajamento dos compradores</h3>
+        <div class="muted" style="margin-top:4px">Participação dos usuários comerciais nos retornos do período</div>
+        <div class="table-wrap" style="margin-top:12px">${repoUserEngagementTable(data.commercialUserEngagement || [])}</div>
+      </section>
+      <section class="panel">
+        <h3>Retorno comercial</h3>
+        <div class="table-wrap" style="margin-top:12px">${repoCommercialTable()}</div>
+      </section>
+    </div>
+  `;
+  document.getElementById("refreshCommercialDashboard").addEventListener("click", async () => {
+    await loadReposition();
+    renderCommercialDashboard();
+  });
+  document.getElementById("commercialDashboardFilterForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    state.repo.filters = Object.fromEntries(new FormData(event.currentTarget).entries());
+    await loadReposition();
+    renderCommercialDashboard();
+  });
+  bindRepoCommercialButtons();
+}
+function renderReposition() {
+  const data = state.repo.dashboard || { summary: {}, bySector: [] };
+  const summary = data.summary || {};
+  const metrics = [
+    ["Atividades", summary.taskTotal || 0],
+    ["Realizadas", summary.completed || 0],
+    ["Pendentes", summary.pending || 0],
+    ["Rupturas", summary.ruptures || 0],
+    ["Pedidos confirmados", summary.rupturesPurchased || 0],
+    ["Validades", summary.expirations || 0],
+    ["Validades com aÃ§Ã£o", summary.expirationsActioned || 0],
+    ["Avarias", summary.damages || 0],
+  ];
+  view.innerHTML = `
+    <div class="topbar">
+      <div>
+        <h2>ReposiÃ§Ã£o da loja</h2>
+        <div class="muted">Atividades, rupturas, validades, avarias e retorno comercial</div>
+      </div>
+      <button class="btn" id="refreshReposition">Atualizar</button>
+    </div>
+    <form class="panel grid" id="repoFilterForm" style="margin-bottom:14px">
+      <div class="grid two">
+        <label>InÃ­cio <input name="startDate" type="date" value="${escapeHtml(state.repo.filters.startDate)}"></label>
+        <label>Fim <input name="endDate" type="date" value="${escapeHtml(state.repo.filters.endDate)}"></label>
+      </div>
+      <button class="btn primary" type="submit">Aplicar perÃ­odo</button>
+    </form>
+    <div class="metrics">${metrics.map(([label, value]) => `<div class="metric"><span class="muted">${label}</span><strong>${value}</strong></div>`).join("")}</div>
+    <div class="grid two" style="margin-top:14px">
+      <section class="panel">${repoTaskForm()}</section>
+      <section class="panel">${repoIssueForm("ruptures", "Rupturas", "Produto em falta", [["type", "Tipo", ["Ruptura total", "Proximo de ruptura"]], ["quantity", "Quantidade"]])}</section>
+    </div>
+    <div class="grid two" style="margin-top:14px">
+      <section class="panel">${repoIssueForm("expirations", "Validades", "Produto com validade curta", [["expirationDate", "Data de validade", "date"], ["quantity", "Quantidade"]])}</section>
+      <section class="panel">${repoDamageForm()}</section>
+    </div>
+    <div class="grid two" style="margin-top:14px">
+      <section class="panel">
+        <h3>Indicadores por setor</h3>
+        <div class="table-wrap" style="margin-top:12px">${repoSectorTable(data.bySector || [])}</div>
+      </section>
+      <section class="panel">
+        <h3>Retorno comercial</h3>
+        <div class="table-wrap" style="margin-top:12px">${repoCommercialTable()}</div>
+      </section>
+    </div>
+    <section class="panel" style="margin-top:14px">
+      <h3>Atividades registradas</h3>
+      <div class="table-wrap" style="margin-top:12px">${repoTasksTable()}</div>
+    </section>
+  `;
+  document.getElementById("refreshReposition").addEventListener("click", async () => {
+    await loadReposition();
+    renderReposition();
+  });
+  document.getElementById("repoFilterForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    state.repo.filters = Object.fromEntries(new FormData(event.currentTarget).entries());
+    await loadReposition();
+    renderReposition();
+  });
+  bindRepoForms();
+}
+
+function repoTaskForm() {
+  const linked = state.user?.collaborator_id ? state.collaborators.find((item) => Number(item.id) === Number(state.user.collaborator_id)) : null;
+  const linkedSectors = collaboratorSectors(linked);
+  const collaboratorField = linked
+    ? `<input value="${escapeHtml(linked.name)}" disabled><input type="hidden" name="collaboratorId" value="${linked.id}">`
+    : `<select name="collaboratorId" required>${repoCollaboratorOptions()}</select>`;
+  const sectorField = linked && linkedSectors.length === 1
+    ? `<input value="${escapeHtml(linkedSectors[0])}" disabled><input type="hidden" name="sector" value="${escapeHtml(linkedSectors[0])}">`
+    : `<select name="sector" required>${repoTaskSectorOptions(linked)}</select>`;
+  return `
+    <h3>Checklist diÃ¡rio da reposiÃ§Ã£o</h3>
+    <div class="muted" style="margin-top:4px">${linked ? "Acesso vinculado ao seu cadastro" : "Data e horÃ¡rio sÃ£o registrados automaticamente no envio"}</div>
+    <form class="grid" id="repoTaskForm" style="margin-top:12px">
+      <div class="grid two">
+        <label>Colaborador ${collaboratorField}</label>
+        <label>Setor ${sectorField}</label>
+      </div>
+      <div class="grid two">
+        <label>Atividade <select name="activity">${repoOptions(state.repo.activities)}</select></label>
+        <label>Sim / NÃ£o
+          <select name="answer" required><option>Sim</option><option>NÃ£o</option></select>
+        </label>
+      </div>
+      <label>ObservaÃ§Ã£o <textarea name="observation"></textarea></label>
+      <button class="btn primary" type="submit">Enviar checklist</button>
+    </form>
+  `;
+}
+
+function repoIssueForm(kind, title, productLabel, fields) {
+  return `
+    <h3>${title}</h3>
+    <form class="grid" id="repo-${kind}-form" data-repo-kind="${kind}" style="margin-top:12px">
+      <div class="grid two">
+        <label>Data <input name="date" type="date" value="${todayInputValue()}"></label>
+        <label>Setor <select name="sector">${repoSectorOptionsForCurrentUser()}</select></label>
+      </div>
+      <label>${productLabel} <input name="product" required></label>
+      <div class="grid two">
+        ${fields.map(([name, label, typeOrOptions]) => Array.isArray(typeOrOptions)
+          ? `<label>${label} <select name="${name}">${repoOptions(typeOrOptions)}</select></label>`
+          : `<label>${label} <input name="${name}" type="${typeOrOptions || "text"}"></label>`).join("")}
+      </div>
+      <label>ObservaÃ§Ã£o <textarea name="observation"></textarea></label>
+      <button class="btn primary" type="submit">Salvar</button>
+    </form>
+  `;
+}
+
+function repoDamageForm() {
+  return `
+    <h3>Avarias</h3>
+    <form class="grid" id="repo-damages-form" data-repo-kind="damages" style="margin-top:12px">
+      <div class="grid two">
+        <label>Data <input name="date" type="date" value="${todayInputValue()}"></label>
+        <label>Setor <select name="sector">${repoSectorOptionsForCurrentUser()}</select></label>
+      </div>
+      <label>Produto <input name="product" required></label>
+      <div class="grid two">
+        <label>Quantidade <input name="quantity"></label>
+        <label>Motivo <input name="reason"></label>
+      </div>
+      <label>AÃ§Ã£o tomada <input name="action"></label>
+      <button class="btn primary" type="submit">Salvar avaria</button>
+    </form>
+  `;
+}
+
+function bindRepoForms() {
+  const taskForm = document.getElementById("repoTaskForm");
+  const syncRepoTaskSector = () => {
+    const collaboratorId = taskForm.elements.collaboratorId?.value;
+    const sectorField = taskForm.elements.sector;
+    const collaborator = state.collaborators.find((item) => Number(item.id) === Number(collaboratorId));
+    const assigned = collaboratorSectors(collaborator);
+    if (!sectorField || sectorField.tagName !== "SELECT") return;
+    sectorField.innerHTML = repoOptions(assigned.length ? assigned : state.repo.sectors);
+  };
+  taskForm.elements.collaboratorId?.addEventListener("change", syncRepoTaskSector);
+  syncRepoTaskSector();
+
+  taskForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await api("/api/reposition/tasks", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget).entries())) });
+    await loadReposition();
+    renderReposition();
+    toast("Checklist da reposiÃ§Ã£o enviado.");
+  });
+  document.querySelectorAll("[data-repo-kind]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const kind = event.currentTarget.dataset.repoKind;
+      await api(`/api/reposition/${kind}`, { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget).entries())) });
+      await loadReposition();
+      renderReposition();
+      toast("Registro salvo.");
+    });
+  });
+  bindRepoCommercialButtons();
+}
+
+function bindRepoCommercialButtons() {
+  document.querySelectorAll("[data-repo-commercial]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const [kind, id] = button.dataset.repoCommercial.split(":");
+      const commercialStatus = kind === "ruptures"
+        ? (confirm("O pedido foi realizado?") ? "Pedido realizado" : "Pedido nÃ£o realizado")
+        : (confirm("Foi feita aÃ§Ã£o ou rebaixa?") ? "AÃ§Ã£o ou rebaixa realizada" : "AÃ§Ã£o nÃ£o realizada");
+      const commercialObservation = prompt("ObservaÃ§Ã£o do comercial") || "";
+      await api(`/api/reposition/${kind}/${id}`, { method: "PUT", body: JSON.stringify({ commercialStatus, commercialObservation }) });
+      await loadReposition();
+      renderReposition();
+      toast("Retorno comercial atualizado.");
+    });
+  });
+}
+
+function repoSectorTable(rows) {
+  return `
+    <table><thead><tr><th>Setor</th><th>Atividades</th><th>Rupturas</th><th>Validades</th><th>Avarias</th></tr></thead><tbody>
+      ${rows.map((row) => `<tr><td data-label="Setor">${escapeHtml(row.sector)}</td><td data-label="Atividades">${row.tasks || 0}</td><td data-label="Rupturas">${row.ruptures || 0}</td><td data-label="Validades">${row.expirations || 0}</td><td data-label="Avarias">${row.damages || 0}</td></tr>`).join("") || `<tr><td colspan="5">Sem registros.</td></tr>`}
+    </tbody></table>
+  `;
+}
+
+function repoUserEngagementTable(rows) {
+  return `
+    <table><thead><tr><th>UsuÃ¡rio</th><th>Registros</th><th>Engajamento</th></tr></thead><tbody>
+      ${rows.map((row) => `<tr>
+        <td data-label="UsuÃ¡rio">${escapeHtml(row.name)}</td>
+        <td data-label="Registros">${row.total || 0}</td>
+        <td data-label="Engajamento">${percentBar(row.percent || 0)}</td>
+      </tr>`).join("") || `<tr><td colspan="3">Nenhum usuÃ¡rio cadastrado para este perfil.</td></tr>`}
+    </tbody></table>
+  `;
+}
+
+function repoActivityCompletionTable(rows) {
+  return `
+    <table><thead><tr><th>Atividade</th><th>Realizado</th><th>Percentual</th></tr></thead><tbody>
+      ${rows.map((row) => `<tr>
+        <td data-label="Atividade">${escapeHtml(row.activity)}</td>
+        <td data-label="Realizado">${row.total || 0}/${row.expected || 0}</td>
+        <td data-label="Percentual">${percentBar(row.percent || 0)}</td>
+      </tr>`).join("") || `<tr><td colspan="3">Sem atividades cadastradas.</td></tr>`}
+    </tbody></table>
+  `;
+}
+
+function repoCommercialTable() {
+  const rows = [
+    ...state.repo.ruptures.map((row) => ({ ...row, kind: "ruptures", origin: "Ruptura", detail: row.type || "" })),
+    ...state.repo.expirations.map((row) => ({ ...row, kind: "expirations", origin: "Validade", detail: row.expiration_date ? fmtDate(row.expiration_date) : "" })),
+  ].slice(0, 30);
+  return `
+    <table><thead><tr><th>Origem</th><th>Produto</th><th>Setor</th><th>Detalhe</th><th>Status</th><th>Retorno</th><th>AÃ§Ã£o</th></tr></thead><tbody>
+      ${rows.map((row) => `<tr>
+        <td data-label="Origem">${row.origin}</td>
+        <td data-label="Produto">${escapeHtml(row.product)}</td>
+        <td data-label="Setor">${escapeHtml(row.sector)}</td>
+        <td data-label="Detalhe">${escapeHtml(row.detail)}</td>
+        <td data-label="Status"><span class="status ${row.status === "Resolvido" ? "ok" : "warn"}">${escapeHtml(row.status)}</span></td>
+        <td data-label="Retorno">${escapeHtml(row.commercial_status || "")}</td>
+        <td data-label="AÃ§Ã£o"><button class="btn" type="button" data-repo-commercial="${row.kind}:${row.id}">Atualizar</button></td>
+      </tr>`).join("") || `<tr><td colspan="7">Sem registros comerciais.</td></tr>`}
+    </tbody></table>
+  `;
+}
+
+function repoTasksTable() {
+  return `
+    <table><thead><tr><th>Data</th><th>Colaborador</th><th>Setor</th><th>Atividade</th><th>Resposta</th><th>ObservaÃ§Ã£o</th></tr></thead><tbody>
+      ${state.repo.tasks.map((row) => `<tr>
+        <td data-label="Data">${fmtDate(row.date)}</td>
+        <td data-label="Colaborador">${escapeHtml(row.collaborator)}</td>
+        <td data-label="Setor">${escapeHtml(row.sector)}</td>
+        <td data-label="Atividade">${escapeHtml(row.activity)}</td>
+        <td data-label="Resposta"><span class="status ${row.status === "Realizado" ? "ok" : "danger"}">${row.status === "Realizado" ? "Sim" : "NÃ£o"}</span></td>
+        <td data-label="ObservaÃ§Ã£o">${escapeHtml(row.observation || "")}</td>
+      </tr>`).join("") || `<tr><td colspan="6">Sem atividades registradas.</td></tr>`}
+    </tbody></table>
+  `;
 }
 
 function renderPendencies() {
   view.innerHTML = `
     <div class="topbar">
       <div>
-        <h2>Pendências</h2>
-        <div class="muted">Controle de abertura, andamento e solução</div>
+        <h2>PendÃªncias</h2>
+        <div class="muted">Controle de abertura, andamento e soluÃ§Ã£o</div>
       </div>
     </div>
     <form class="panel grid" id="pendencyForm">
       <div class="grid three">
-        <label>Responsável <select name="responsibleId" required>${collaboratorOptions()}</select></label>
+        <label>ResponsÃ¡vel <select name="responsibleId" required>${collaboratorOptions()}</select></label>
         <label>Data de abertura <input name="openedAt" type="date" required value="${new Date().toISOString().slice(0, 10)}"></label>
         <label>Status <select name="status"><option>Aberto</option><option>Em andamento</option><option>Resolvido</option></select></label>
       </div>
-      <label>Descrição <textarea name="description" required></textarea></label>
-      <label>Observação da solução <textarea name="solutionObservation"></textarea></label>
-      <button class="btn primary" type="submit">Salvar pendência</button>
+      <label>DescriÃ§Ã£o <textarea name="description" required></textarea></label>
+      <label>ObservaÃ§Ã£o da soluÃ§Ã£o <textarea name="solutionObservation"></textarea></label>
+      <button class="btn primary" type="submit">Salvar pendÃªncia</button>
     </form>
     <div class="table-wrap" style="margin-top:14px" id="pendenciesTable"></div>
   `;
@@ -801,54 +1417,59 @@ function renderPendencies() {
     await loadPendencies();
     form.reset();
     renderPendencies();
-    toast("Pendência salva.");
+    toast("PendÃªncia salva.");
   });
 }
 
 function drawPendenciesTable() {
   document.getElementById("pendenciesTable").innerHTML = `
-    <table><thead><tr><th>Descrição</th><th>Responsável</th><th>Abertura</th><th>Status</th><th>Solução</th></tr></thead><tbody>
+    <table><thead><tr><th>DescriÃ§Ã£o</th><th>ResponsÃ¡vel</th><th>Abertura</th><th>Status</th><th>SoluÃ§Ã£o</th></tr></thead><tbody>
       ${state.pendencies.map((row) => `
         <tr>
-          <td data-label="Descrição">${escapeHtml(row.description)}</td>
-          <td data-label="Responsável">${escapeHtml(row.responsible)}</td>
+          <td data-label="DescriÃ§Ã£o">${escapeHtml(row.description)}</td>
+          <td data-label="ResponsÃ¡vel">${escapeHtml(row.responsible)}</td>
           <td data-label="Abertura">${fmtDate(row.opened_at)}</td>
           <td data-label="Status"><span class="status ${row.status === "Resolvido" ? "ok" : row.status === "Em andamento" ? "warn" : "danger"}">${escapeHtml(row.status)}</span></td>
-          <td data-label="Solução">${escapeHtml(row.solution_observation || "")}</td>
+          <td data-label="SoluÃ§Ã£o">${escapeHtml(row.solution_observation || "")}</td>
         </tr>
-      `).join("") || `<tr><td colspan="5">Nenhuma pendência cadastrada.</td></tr>`}
+      `).join("") || `<tr><td colspan="5">Nenhuma pendÃªncia cadastrada.</td></tr>`}
     </tbody></table>
   `;
 }
 
 function renderCollaborators() {
   view.innerHTML = `
-    <div class="topbar">
+      <div class="topbar">
       <div>
         <h2>Colaboradores</h2>
-        <div class="muted">Cadastro de pessoas habilitadas no relatório</div>
+        <div class="muted">Cadastro de colaboradores, compradores e setores direcionados</div>
       </div>
     </div>
     <form class="panel grid" id="collaboratorForm">
       <input type="hidden" name="id">
-      <div class="grid three">
+      <div class="grid four">
         <label>Nome <input name="name" required></label>
         <label>Cargo <input name="role" required></label>
+        <div class="field-group">
+          <div class="field-label">Setores direcionados</div>
+          <div class="check-grid sector-picker">${collaboratorSectorCheckboxes()}</div>
+        </div>
         <label>Status <select name="status"><option value="ativo">Ativo</option><option value="inativo">Inativo</option></select></label>
       </div>
       <div class="toolbar">
         <button class="btn primary" type="submit" id="collaboratorSubmit">Cadastrar colaborador</button>
-        <button class="btn hidden" type="button" id="cancelCollaboratorEdit">Cancelar edição</button>
+        <button class="btn hidden" type="button" id="cancelCollaboratorEdit">Cancelar ediÃ§Ã£o</button>
       </div>
     </form>
     <div class="table-wrap" style="margin-top:14px">
-      <table><thead><tr><th>Nome</th><th>Cargo</th><th>Status</th><th>Ações</th></tr></thead><tbody>
+      <table><thead><tr><th>Nome</th><th>Cargo</th><th>Setores direcionados</th><th>Status</th><th>AÃ§Ãµes</th></tr></thead><tbody>
         ${state.collaborators.map((row) => `
           <tr>
             <td data-label="Nome">${escapeHtml(row.name)}</td>
             <td data-label="Cargo">${escapeHtml(row.role)}</td>
+            <td data-label="Setores direcionados">${escapeHtml(displayCollaboratorSectors(row))}</td>
             <td data-label="Status"><span class="status ${row.status === "ativo" ? "ok" : ""}">${row.status}</span></td>
-            <td data-label="Ações">
+            <td data-label="AÃ§Ãµes">
               <div class="toolbar">
                 <button class="btn" type="button" data-edit-collaborator="${row.id}">Editar</button>
                 <button class="btn danger" type="button" data-delete-collaborator="${row.id}">Excluir</button>
@@ -873,6 +1494,8 @@ function renderCollaborators() {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(form).entries());
+    const selectedSectors = Array.from(form.querySelectorAll('input[name="sector"]:checked')).map((option) => option.value).filter(Boolean);
+    body.sector = selectedSectors.length ? JSON.stringify(selectedSectors) : "";
     const id = body.id;
     delete body.id;
     await api(id ? `/api/collaborators/${id}` : "/api/collaborators", {
@@ -893,6 +1516,10 @@ function renderCollaborators() {
       form.id.value = collaborator.id;
       form.name.value = collaborator.name;
       form.role.value = collaborator.role;
+      const selectedSectors = new Set(collaboratorSectors(collaborator));
+      form.querySelectorAll('input[name="sector"]').forEach((option) => {
+        option.checked = selectedSectors.has(option.value);
+      });
       form.status.value = collaborator.status;
       submitButton.textContent = "Salvar alterações";
       cancelButton.classList.remove("hidden");
@@ -909,9 +1536,10 @@ function renderCollaborators() {
       const result = await api(`/api/collaborators/${collaborator.id}`, { method: "DELETE" });
       await loadCollaborators();
       renderCollaborators();
-      toast(result.message || "Colaborador excluído.");
+      toast(result.message || "Colaborador excluÃ­do.");
     });
   });
+  fixVisibleText(view);
 }
 
 function renderUsers() {
@@ -919,28 +1547,30 @@ function renderUsers() {
     <div class="topbar">
       <div>
         <h2>Acessos</h2>
-        <div class="muted">Defina usuário e senha para cada colaborador acessar diretamente o checklist</div>
+        <div class="muted">Defina usuÃ¡rio e senha para cada colaborador acessar diretamente o checklist</div>
       </div>
     </div>
     <form class="panel grid" id="userForm">
       <input type="hidden" name="id">
       <div class="grid three">
         <label>Nome exibido <input name="displayName" required></label>
-        <label>Usuário <input name="username" required autocomplete="off"></label>
+        <label>UsuÃ¡rio <input name="username" required autocomplete="off"></label>
         <label>Senha <input name="password" required autocomplete="new-password"></label>
       </div>
       <div class="grid three">
         <label>Perfil
           <select name="role" required>
             <option value="colaborador">Colaborador</option>
-            <option value="prevencao">Prevenção</option>
+            <option value="prevencao">PrevenÃ§Ã£o</option>
             <option value="encarregada">Encarregada</option>
+            <option value="reposicao">ReposiÃ§Ã£o</option>
+            <option value="comercial">Comercial</option>
             <option value="administrador">Administrador</option>
           </select>
         </label>
         <label>Colaborador vinculado
           <select name="collaboratorId">
-            <option value="">Sem vínculo</option>
+            <option value="">Sem vÃ­nculo</option>
             ${collaboratorOptions(false)}
           </select>
         </label>
@@ -950,20 +1580,20 @@ function renderUsers() {
       </div>
       <div class="toolbar">
         <button class="btn primary" type="submit" id="userSubmit">Criar acesso</button>
-        <button class="btn hidden" type="button" id="cancelUserEdit">Cancelar edição</button>
+        <button class="btn hidden" type="button" id="cancelUserEdit">Cancelar ediÃ§Ã£o</button>
       </div>
     </form>
     <div class="table-wrap" style="margin-top:14px">
-      <table><thead><tr><th>Nome</th><th>Usuário</th><th>Senha</th><th>Perfil</th><th>Colaborador</th><th>Status</th><th>Ações</th></tr></thead><tbody>
+      <table><thead><tr><th>Nome</th><th>UsuÃ¡rio</th><th>Senha</th><th>Perfil</th><th>Colaborador</th><th>Status</th><th>AÃ§Ãµes</th></tr></thead><tbody>
         ${state.users.map((row) => `
           <tr>
             <td data-label="Nome">${escapeHtml(row.display_name)}</td>
-            <td data-label="Usuário">${escapeHtml(row.username)}</td>
+            <td data-label="UsuÃ¡rio">${escapeHtml(row.username)}</td>
             <td data-label="Senha">${escapeHtml(row.password)}</td>
             <td data-label="Perfil">${escapeHtml(row.role)}</td>
             <td data-label="Colaborador">${escapeHtml(row.collaborator || "-")}</td>
             <td data-label="Status"><span class="status ${row.status === "ativo" ? "ok" : ""}">${escapeHtml(row.status)}</span></td>
-            <td data-label="Ações">
+            <td data-label="AÃ§Ãµes">
               <div class="toolbar">
                 <button class="btn" type="button" data-edit-user="${row.id}">Editar</button>
                 <button class="btn danger" type="button" data-delete-user="${row.id}">Excluir</button>
@@ -1028,7 +1658,7 @@ function renderUsers() {
       const result = await api(`/api/users/${access.id}`, { method: "DELETE" });
       await loadUsers();
       renderUsers();
-      toast(result.message || "Acesso excluído.");
+      toast(result.message || "Acesso excluÃ­do.");
     });
   });
 }
@@ -1043,3 +1673,5 @@ function fileToDataUrl(file) {
 }
 
 bootstrap();
+
+

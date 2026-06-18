@@ -59,6 +59,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             role TEXT NOT NULL,
+            sector TEXT,
             status TEXT NOT NULL DEFAULT 'ativo',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -116,6 +117,71 @@ def init_db():
             FOREIGN KEY (responsible_id) REFERENCES collaborators(id),
             FOREIGN KEY (created_by) REFERENCES users(id)
         );
+
+        CREATE TABLE IF NOT EXISTS repo_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            collaborator_id INTEGER NOT NULL,
+            sector TEXT NOT NULL,
+            activity TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'Realizado',
+            observation TEXT,
+            sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_by INTEGER NOT NULL,
+            FOREIGN KEY (collaborator_id) REFERENCES collaborators(id),
+            FOREIGN KEY (created_by) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS repo_ruptures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            product TEXT NOT NULL,
+            sector TEXT NOT NULL,
+            type TEXT NOT NULL,
+            quantity TEXT,
+            observation TEXT,
+            status TEXT NOT NULL DEFAULT 'Aberto',
+            commercial_status TEXT NOT NULL DEFAULT 'Pendente',
+            commercial_observation TEXT,
+            commercial_updated_by INTEGER,
+            sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT,
+            created_by INTEGER NOT NULL,
+            FOREIGN KEY (commercial_updated_by) REFERENCES users(id),
+            FOREIGN KEY (created_by) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS repo_expirations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            product TEXT NOT NULL,
+            sector TEXT NOT NULL,
+            expiration_date TEXT NOT NULL,
+            quantity TEXT,
+            observation TEXT,
+            status TEXT NOT NULL DEFAULT 'Aberto',
+            commercial_status TEXT NOT NULL DEFAULT 'Pendente',
+            commercial_observation TEXT,
+            commercial_updated_by INTEGER,
+            sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT,
+            created_by INTEGER NOT NULL,
+            FOREIGN KEY (commercial_updated_by) REFERENCES users(id),
+            FOREIGN KEY (created_by) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS repo_damages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            product TEXT NOT NULL,
+            sector TEXT NOT NULL,
+            quantity TEXT,
+            reason TEXT,
+            action TEXT,
+            sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_by INTEGER NOT NULL,
+            FOREIGN KEY (created_by) REFERENCES users(id)
+        );
         """
     )
 
@@ -124,6 +190,10 @@ def init_db():
         conn.execute("ALTER TABLE users ADD COLUMN collaborator_id INTEGER")
     if "status" not in user_columns:
         conn.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'ativo'")
+
+    collaborator_columns = [row["name"] for row in conn.execute("PRAGMA table_info(collaborators)").fetchall()]
+    if "sector" not in collaborator_columns:
+        conn.execute("ALTER TABLE collaborators ADD COLUMN sector TEXT")
 
     summary_columns = [row["name"] for row in conn.execute("PRAGMA table_info(operational_summaries)").fetchall()]
     if "bottles_details" not in summary_columns:
@@ -135,6 +205,14 @@ def init_db():
     if "expired_products" not in checklist_columns:
         conn.execute("ALTER TABLE checklists ADD COLUMN expired_products TEXT")
 
+    rupture_columns = [row["name"] for row in conn.execute("PRAGMA table_info(repo_ruptures)").fetchall()]
+    if "commercial_updated_by" not in rupture_columns:
+        conn.execute("ALTER TABLE repo_ruptures ADD COLUMN commercial_updated_by INTEGER")
+
+    expiration_columns = [row["name"] for row in conn.execute("PRAGMA table_info(repo_expirations)").fetchall()]
+    if "commercial_updated_by" not in expiration_columns:
+        conn.execute("ALTER TABLE repo_expirations ADD COLUMN commercial_updated_by INTEGER")
+
     if not db_exists and conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         conn.executemany(
             "INSERT INTO users (username, password, role, display_name) VALUES (?, ?, ?, ?)",
@@ -145,12 +223,12 @@ def init_db():
 
     if SEED_EXAMPLE_DATA and not db_exists and conn.execute("SELECT COUNT(*) FROM collaborators").fetchone()[0] == 0:
         conn.executemany(
-            "INSERT INTO collaborators (name, role, status) VALUES (?, ?, ?)",
+            "INSERT INTO collaborators (name, role, sector, status) VALUES (?, ?, ?, ?)",
             [
-                ("Ana Paula Santos", "Prevencao de Perdas", "ativo"),
-                ("Carlos Henrique Lima", "Fiscal de Loja", "ativo"),
-                ("Maria Eduarda Rocha", "Encarregada", "ativo"),
-                ("Joao Batista Silva", "Conferente", "inativo"),
+                ("Ana Paula Santos", "Prevencao de Perdas", "", "ativo"),
+                ("Carlos Henrique Lima", "Fiscal de Loja", "", "ativo"),
+                ("Maria Eduarda Rocha", "Encarregada", "", "ativo"),
+                ("Joao Batista Silva", "Conferente", "", "inativo"),
             ],
         )
 
