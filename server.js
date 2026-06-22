@@ -2,6 +2,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 
 const ROOT = __dirname;
@@ -15,9 +16,14 @@ const DATABASE_URL = process.env.DATABASE_URL || "";
 let pgPool = null;
 
 const sessions = new Map();
+const loginAttempts = new Map();
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const LOGIN_LOCK_MS = 10 * 60 * 1000;
+const MAX_LOGIN_ATTEMPTS = 5;
 const PRICE_DIVERGENCE_ACTIVITY = "Confer\u00eancia de precifica\u00e7\u00e3o";
 const EXPIRED_PRODUCTS_ACTIVITY = "Verifica\u00e7\u00e3o de validades";
 const RECEIPTS_ACTIVITY = "Acompanhamento de recebimentos";
+const SECTOR_REQUIRED_ACTIVITY_TERMS = ["validade", "ruptura", "precificacao", "preco"];
 const ENGAGEMENT_EXCLUDED_ACTIVITIES = [
   "Lan\u00e7amento de perdas no sistema",
   "Lan\u00e7amento de consumo interno",
@@ -123,6 +129,7 @@ async function initPostgres(pool) {
       activity TEXT NOT NULL,
       answer TEXT NOT NULL,
       observation TEXT,
+      sector TEXT,
       price_divergence_products TEXT,
       expired_products TEXT,
       photo_path TEXT,
@@ -220,8 +227,48 @@ async function initPostgres(pool) {
       sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       created_by INTEGER NOT NULL REFERENCES users(id)
     );
+
+    CREATE TABLE IF NOT EXISTS sector_audits (
+      id SERIAL PRIMARY KEY,
+      date TEXT NOT NULL,
+      sector TEXT NOT NULL,
+      manager_status TEXT NOT NULL DEFAULT 'Pendente',
+      observation TEXT,
+      action_required TEXT,
+      responsible TEXT,
+      due_date TEXT,
+      audited_by INTEGER REFERENCES users(id),
+      audited_at TIMESTAMP,
+      UNIQUE(date, sector)
+    );
+
+    CREATE TABLE IF NOT EXISTS sector_audit_reviews (
+      id SERIAL PRIMARY KEY,
+      date TEXT NOT NULL,
+      sector TEXT NOT NULL,
+      focus TEXT NOT NULL,
+      manager_status TEXT NOT NULL DEFAULT 'Pendente',
+      observation TEXT,
+      action_required TEXT,
+      responsible TEXT,
+      due_date TEXT,
+      audited_by INTEGER REFERENCES users(id),
+      audited_at TIMESTAMP,
+      UNIQUE(date, sector, focus)
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id),
+      action TEXT NOT NULL,
+      entity TEXT NOT NULL,
+      entity_id TEXT,
+      details TEXT,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
   `);
   await pool.query("ALTER TABLE collaborators ADD COLUMN IF NOT EXISTS sector TEXT");
+  await pool.query("ALTER TABLE checklists ADD COLUMN IF NOT EXISTS sector TEXT");
   await pool.query("ALTER TABLE repo_ruptures ADD COLUMN IF NOT EXISTS commercial_updated_by INTEGER REFERENCES users(id)");
   await pool.query("ALTER TABLE repo_expirations ADD COLUMN IF NOT EXISTS commercial_updated_by INTEGER REFERENCES users(id)");
   const existing = await pool.query("SELECT COUNT(*) AS total FROM users");
@@ -268,6 +315,9 @@ function send(res, status, data, headers = {}) {
   const body = typeof data === "string" || Buffer.isBuffer(data) ? data : JSON.stringify(data);
   res.writeHead(status, {
     "Content-Type": Buffer.isBuffer(data) ? "application/octet-stream" : "application/json; charset=utf-8",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "same-origin",
     ...headers,
   });
   res.end(body);
@@ -291,15 +341,45 @@ function readBody(req) {
   });
 }
 
-function makeToken(user) {
-  const raw = `${user.id}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-  return Buffer.from(raw).toString("base64url");
+function makeToken() {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+function isPasswordHash(value) {
+  return String(value || "").startsWith("scrypt$");
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("base64url");
+  const hash = crypto.scryptSync(String(password || ""), salt, 64).toString("base64url");
+  return `scrypt$${salt}$${hash}`;
+}
+
+function verifyPassword(password, stored) {
+  if (!isPasswordHash(stored)) return String(password || "") === String(stored || "");
+  const [, salt, expected] = String(stored).split("$");
+  if (!salt || !expected) return false;
+  const hash = crypto.scryptSync(String(password || ""), salt, 64);
+  const expectedBuffer = Buffer.from(expected, "base64url");
+  return expectedBuffer.length === hash.length && crypto.timingSafeEqual(hash, expectedBuffer);
+}
+
+function publicUser(user) {
+  if (!user) return user;
+  const { password, ...safe } = user;
+  return safe;
 }
 
 function currentUser(req) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  return sessions.get(token);
+  const session = sessions.get(token);
+  if (!session) return null;
+  if (session.expiresAt <= Date.now()) {
+    sessions.delete(token);
+    return null;
+  }
+  return session.user;
 }
 
 function requireUser(req, res) {
@@ -309,6 +389,40 @@ function requireUser(req, res) {
     return null;
   }
   return user;
+}
+
+function loginAttemptKey(req, username) {
+  return `${req.socket.remoteAddress || "local"}:${String(username || "").toLowerCase()}`;
+}
+
+function isLoginLocked(key) {
+  const attempt = loginAttempts.get(key);
+  return attempt && attempt.lockedUntil && attempt.lockedUntil > Date.now();
+}
+
+function recordLoginFailure(key) {
+  const attempt = loginAttempts.get(key) || { count: 0, lockedUntil: 0 };
+  attempt.count += 1;
+  if (attempt.count >= MAX_LOGIN_ATTEMPTS) {
+    attempt.lockedUntil = Date.now() + LOGIN_LOCK_MS;
+    attempt.count = 0;
+  }
+  loginAttempts.set(key, attempt);
+}
+
+function clearLoginFailures(key) {
+  loginAttempts.delete(key);
+}
+
+async function logAudit(user, action, entity, entityId, details = {}) {
+  try {
+    await execute(
+      "INSERT INTO audit_logs (user_id, action, entity, entity_id, details, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      [user?.id || null, action, entity, entityId == null ? null : String(entityId), JSON.stringify(details), nowIso()]
+    );
+  } catch (error) {
+    console.error("Falha ao registrar auditoria:", error.message);
+  }
 }
 
 function canCorrect(user) {
@@ -383,6 +497,212 @@ async function validateCommercialRecordSector(user, table, id) {
   return "Este registro pertence a um setor que n\u00e3o est\u00e1 direcionado para o seu acesso comercial.";
 }
 
+function auditFocusConfig(focus) {
+  const configs = {
+    limpeza: { label: "Limpeza", terms: ["limpeza"], issueTypes: [] },
+    organizacao: { label: "Organização", terms: ["organizacao", "gondola", "ilha"], issueTypes: [] },
+    abastecimento: { label: "Abastecimento", terms: ["abastecimento"], issueTypes: ["ruptures"] },
+    precificacao: { label: "Precificação", terms: ["precificacao", "preco"], issueTypes: [] },
+    validade: { label: "Validade", terms: ["validade"], issueTypes: ["expirations"] },
+    ruptura: { label: "Ruptura", terms: ["ruptura"], issueTypes: ["ruptures"] },
+    avaria: { label: "Avaria", terms: ["avaria"], issueTypes: ["damages"] },
+    tudo: { label: "Tudo", terms: [], issueTypes: ["ruptures", "expirations", "damages"] },
+  };
+  return configs[focus] || configs.abastecimento;
+}
+
+function focusActivities(focus) {
+  const config = auditFocusConfig(focus);
+  if (focus === "tudo") return repoActivities;
+  return repoActivities.filter((activity) => {
+    const normalized = normalizeText(activity);
+    return config.terms.some((term) => normalized.includes(term));
+  });
+}
+
+function sectorAuditAutomaticStatus(row, focus) {
+  const motives = [];
+  const config = auditFocusConfig(focus);
+  const needsTask = row.expectedTasks > 0;
+  if (needsTask && !row.tasks) motives.push(`Sem registro de ${config.label.toLowerCase()} no per\u00edodo`);
+  if (row.negativeTasks) motives.push(`${row.negativeTasks} atividade(s) marcada(s) como N\u00e3o`);
+  if (row.pendingTasks) motives.push(`${row.pendingTasks} atividade(s) pendente(s)`);
+  if (row.ruptures) motives.push(`${row.ruptures} ruptura(s) apontada(s)`);
+  if (row.expirations) motives.push(`${row.expirations} validade(s) apontada(s)`);
+  if (row.damages) motives.push(`${row.damages} avaria(s) apontada(s)`);
+  if (row.commercialPending) motives.push(`${row.commercialPending} retorno(s) comercial(is) pendente(s)`);
+
+  const status = (needsTask && !row.tasks) || row.commercialPending || row.negativeTasks >= 2 || row.ruptures + row.expirations + row.damages >= 3
+    ? "Cr\u00edtico"
+    : (row.negativeTasks || row.pendingTasks || row.ruptures || row.expirations || row.damages ? "Aten\u00e7\u00e3o" : "Em conformidade");
+
+  return {
+    status,
+    motives: motives.length ? motives : ["Sem diverg\u00eancias apontadas"],
+  };
+}
+
+async function sectorAuditDashboard(start, end, focus = "abastecimento") {
+  const period = periodInfo(start, end);
+  const selectedActivities = focusActivities(focus);
+  const expectedTasks = selectedActivities.length * period.days;
+  const selectedActivitySet = new Set(selectedActivities);
+  const config = auditFocusConfig(focus);
+  const sectors = new Map(repoSectors.map((sector) => [sector, {
+    sector,
+    focus,
+    focusLabel: config.label,
+    tasks: 0,
+    completedTasks: 0,
+    negativeTasks: 0,
+    expectedTasks,
+    pendingTasks: expectedTasks,
+    ruptures: 0,
+    expirations: 0,
+    damages: 0,
+    commercialPending: 0,
+    lastUpdate: "",
+    collaborators: new Set(),
+    notes: [],
+  }]));
+  const ensure = (sector) => {
+    const key = sector || "Sem setor";
+    if (!sectors.has(key)) {
+      sectors.set(key, {
+        sector: key,
+        focus,
+        focusLabel: config.label,
+        tasks: 0,
+        completedTasks: 0,
+        negativeTasks: 0,
+        expectedTasks,
+        pendingTasks: expectedTasks,
+        ruptures: 0,
+        expirations: 0,
+        damages: 0,
+        commercialPending: 0,
+        lastUpdate: "",
+        collaborators: new Set(),
+        notes: [],
+      });
+    }
+    return sectors.get(key);
+  };
+  const touch = (row, sentAt) => {
+    if (sentAt && (!row.lastUpdate || String(sentAt) > String(row.lastUpdate))) row.lastUpdate = sentAt;
+  };
+
+  const responsibleRows = await query("SELECT name, sector FROM collaborators WHERE status = 'ativo'");
+  responsibleRows.forEach((collaborator) => {
+    parseCollaboratorSectors(collaborator.sector).forEach((sector) => ensure(sector).collaborators.add(collaborator.name));
+  });
+
+  const taskRows = await query(
+    `SELECT t.date, t.sector, t.activity, t.status, t.observation, t.sent_at, c.name AS collaborator
+     FROM repo_tasks t JOIN collaborators c ON c.id = t.collaborator_id
+     WHERE t.date BETWEEN ? AND ?`,
+    [start, end]
+  );
+  const completedKeys = new Set();
+  taskRows.forEach((task) => {
+    if (focus !== "tudo" && !selectedActivitySet.has(task.activity)) return;
+    const row = ensure(task.sector);
+    row.tasks += 1;
+    if (task.status === "Realizado") {
+      completedKeys.add(`${task.sector}|${task.date}|${task.activity}`);
+      row.completedTasks += 1;
+    } else {
+      row.negativeTasks += 1;
+      row.notes.push(`${task.activity}: ${task.observation || "marcada como N\u00e3o"}`);
+    }
+    if (task.collaborator) row.collaborators.add(task.collaborator);
+    touch(row, task.sent_at);
+  });
+  sectors.forEach((row) => {
+    const sectorCompleted = Array.from(completedKeys).filter((key) => key.startsWith(`${row.sector}|`)).length;
+    row.pendingTasks = Math.max(expectedTasks - sectorCompleted, 0);
+  });
+
+  if (config.issueTypes.includes("ruptures")) {
+    const ruptureRows = await query("SELECT sector, product, commercial_status, sent_at FROM repo_ruptures WHERE date BETWEEN ? AND ?", [start, end]);
+    ruptureRows.forEach((item) => {
+      const row = ensure(item.sector);
+      row.ruptures += 1;
+      if (item.commercial_status === "Pendente") row.commercialPending += 1;
+      row.notes.push(`Ruptura: ${item.product}`);
+      touch(row, item.sent_at);
+    });
+  }
+
+  if (config.issueTypes.includes("expirations")) {
+    const expirationRows = await query("SELECT sector, product, commercial_status, sent_at FROM repo_expirations WHERE date BETWEEN ? AND ?", [start, end]);
+    expirationRows.forEach((item) => {
+      const row = ensure(item.sector);
+      row.expirations += 1;
+      if (item.commercial_status === "Pendente") row.commercialPending += 1;
+      row.notes.push(`Validade: ${item.product}`);
+      touch(row, item.sent_at);
+    });
+  }
+
+  if (config.issueTypes.includes("damages")) {
+    const damageRows = await query("SELECT sector, product, sent_at FROM repo_damages WHERE date BETWEEN ? AND ?", [start, end]);
+    damageRows.forEach((item) => {
+      const row = ensure(item.sector);
+      row.damages += 1;
+      row.notes.push(`Avaria: ${item.product}`);
+      touch(row, item.sent_at);
+    });
+  }
+
+  const auditRows = await query(
+    `SELECT a.*, u.display_name AS audited_by_name
+     FROM sector_audit_reviews a
+     LEFT JOIN users u ON u.id = a.audited_by
+     WHERE a.date BETWEEN ? AND ? AND a.focus = ?
+     ORDER BY a.audited_at DESC`,
+    [start, end, focus]
+  );
+  const audits = new Map();
+  auditRows.forEach((audit) => {
+    if (!audits.has(audit.sector)) audits.set(audit.sector, audit);
+  });
+
+  return Array.from(sectors.values()).map((row) => {
+    const automatic = sectorAuditAutomaticStatus(row, focus);
+    const audit = audits.get(row.sector) || null;
+    return {
+      sector: row.sector,
+      focus: row.focus,
+      focusLabel: row.focusLabel,
+      automaticStatus: automatic.status,
+      motives: automatic.motives,
+      responsible: Array.from(row.collaborators).join(", ") || "-",
+      tasks: row.tasks,
+      expectedTasks: row.expectedTasks,
+      completedTasks: row.completedTasks,
+      negativeTasks: row.negativeTasks,
+      pendingTasks: row.pendingTasks,
+      ruptures: row.ruptures,
+      expirations: row.expirations,
+      damages: row.damages,
+      commercialPending: row.commercialPending,
+      lastUpdate: row.lastUpdate,
+      notes: row.notes.slice(0, 6),
+      managerStatus: audit?.manager_status || "Pendente",
+      managerObservation: audit?.observation || "",
+      actionRequired: audit?.action_required || "",
+      auditResponsible: audit?.responsible || "",
+      dueDate: audit?.due_date || "",
+      auditedBy: audit?.audited_by_name || "",
+      auditedAt: audit?.audited_at || "",
+    };
+  }).sort((a, b) => {
+    const rank = { "Cr\u00edtico": 0, "Aten\u00e7\u00e3o": 1, "Em conformidade": 2 };
+    return (rank[a.automaticStatus] ?? 3) - (rank[b.automaticStatus] ?? 3) || a.sector.localeCompare(b.sector);
+  });
+}
+
 function canFillEncarregadaOnly(user) {
   return user.role === "encarregada";
 }
@@ -449,6 +769,14 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
+function normalizeText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
 async function rowsForReports(filters) {
   const where = [];
   const params = [];
@@ -472,10 +800,14 @@ async function rowsForReports(filters) {
     where.push("c.activity = ?");
     params.push(filters.activity);
   }
+  if (filters.sector) {
+    where.push("c.sector = ?");
+    params.push(filters.sector);
+  }
   return query(
     `
     SELECT c.id, c.date, c.sent_at, c.collaborator_id, c.created_by, c.photo_path,
-           c.price_divergence_products, c.expired_products,
+           c.sector, c.price_divergence_products, c.expired_products,
            col.name AS collaborator, c.activity, c.answer, c.observation,
            u.display_name AS sent_by
     FROM checklists c
@@ -488,13 +820,21 @@ async function rowsForReports(filters) {
   );
 }
 
+function checklistProductDetails(row) {
+  if (row.activity === PRICE_DIVERGENCE_ACTIVITY) return row.price_divergence_products || "";
+  if (row.activity === EXPIRED_PRODUCTS_ACTIVITY) return row.expired_products || "";
+  return "";
+}
+
 function makeExcel(rows) {
-  const header = ["Data", "Hora de envio", "Colaborador", "Atividade", "Sim/NÃ£o", "ObservaÃ§Ã£o", "Enviado por"];
+  const header = ["Data", "Hora de envio", "Colaborador", "Atividade", "Setor", "Produtos identificados", "Sim/NÃ£o", "ObservaÃ§Ã£o", "Enviado por"];
   const xmlRows = [header, ...rows.map((row) => [
     row.date,
     row.sent_at,
     row.collaborator,
     row.activity,
+    row.sector || "",
+    checklistProductDetails(row),
     row.answer,
     row.observation || "",
     row.sent_by,
@@ -512,6 +852,8 @@ function makePdf(rows) {
     "",
     ...rows.flatMap((row) => [
       `${row.date} | ${row.collaborator} | ${row.activity}`,
+      `Setor: ${row.sector || "-"}`,
+      `Produtos identificados: ${checklistProductDetails(row) || "-"}`,
       `Resposta: ${row.answer}`,
       `ObservaÃ§Ã£o: ${row.observation || "-"}`,
       "",
@@ -548,7 +890,13 @@ function checklistSpecificFields(activity, body) {
   return {
     priceDivergenceProducts: activity === PRICE_DIVERGENCE_ACTIVITY ? body.priceDivergenceProducts || "" : "",
     expiredProducts: activity === EXPIRED_PRODUCTS_ACTIVITY ? body.expiredProducts || "" : "",
+    sector: activityNeedsProductSector(activity) ? body.sector || "" : "",
   };
+}
+
+function activityNeedsProductSector(activity) {
+  const normalized = normalizeText(activity);
+  return SECTOR_REQUIRED_ACTIVITY_TERMS.some((term) => normalized.includes(term));
 }
 
 function pdfEscape(value) {
@@ -563,24 +911,34 @@ async function api(req, res, url) {
 
   if (method === "POST" && url.pathname === "/api/login") {
     const body = await readBody(req);
-  const users = await query(
-      "SELECT id, username, role, display_name, collaborator_id, status FROM users WHERE username = ? AND password = ? AND status = 'ativo'",
-      [
-      body.username,
-      body.password,
-      ]
+    const attemptKey = loginAttemptKey(req, body.username);
+    if (isLoginLocked(attemptKey)) {
+      return send(res, 429, { error: "Muitas tentativas de login. Aguarde alguns minutos e tente novamente." });
+    }
+    const users = await query(
+      "SELECT id, username, password, role, display_name, collaborator_id, status FROM users WHERE username = ? AND status = 'ativo'",
+      [body.username]
     );
-    if (!users[0]) return send(res, 401, { error: "UsuÃ¡rio ou senha invÃ¡lidos." });
-    const token = makeToken(users[0]);
-    sessions.set(token, users[0]);
-    return send(res, 200, { token, user: users[0] });
+    if (!users[0] || !verifyPassword(body.password, users[0].password)) {
+      recordLoginFailure(attemptKey);
+      return send(res, 401, { error: "Usu\u00e1rio ou senha inv\u00e1lidos." });
+    }
+    if (!isPasswordHash(users[0].password)) {
+      await execute("UPDATE users SET password = ? WHERE id = ?", [hashPassword(body.password), users[0].id]);
+    }
+    clearLoginFailures(attemptKey);
+    const token = makeToken();
+    const safeUser = publicUser(users[0]);
+    sessions.set(token, { user: safeUser, expiresAt: Date.now() + SESSION_TTL_MS });
+    await logAudit(safeUser, "login", "users", safeUser.id);
+    return send(res, 200, { token, user: safeUser });
   }
 
   const user = requireUser(req, res);
   if (!user) return;
 
   if (method === "GET" && url.pathname === "/api/me") {
-    return send(res, 200, { user, activities });
+    return send(res, 200, { user, activities, sectors: repoSectors });
   }
 
   if (method === "GET" && url.pathname === "/api/reposition/options") {
@@ -606,7 +964,19 @@ async function api(req, res, url) {
     const start = url.searchParams.get("startDate") || today();
     const end = url.searchParams.get("endDate") || start;
     const commercialFilter = await commercialSectorFilter(user);
+    const period = periodInfo(start, end);
+    const repoScopeSectors = user.role === "reposicao" ? await sectorsForUser(user) : repoSectors;
+    const repoScopeClause = user.role === "reposicao"
+      ? (repoScopeSectors.length ? ` AND sector IN (${repoScopeSectors.map(() => "?").join(", ")})` : " AND 1 = 0")
+      : "";
+    const repoScopeParams = user.role === "reposicao" ? repoScopeSectors : [];
     const taskRows = await query("SELECT status, COUNT(*) AS total FROM repo_tasks WHERE date BETWEEN ? AND ? GROUP BY status", [start, end]);
+    const completedTaskRows = await query(
+      `SELECT COUNT(DISTINCT date || '|' || activity) AS total
+       FROM repo_tasks
+       WHERE date BETWEEN ? AND ? AND status = 'Realizado'${repoScopeClause}`,
+      [start, end, ...repoScopeParams]
+    );
     const ruptureRows = await query(`SELECT status, commercial_status, COUNT(*) AS total FROM repo_ruptures WHERE date BETWEEN ? AND ?${commercialFilter.clause} GROUP BY status, commercial_status`, [start, end, ...commercialFilter.params]);
     const expirationRows = await query(`SELECT status, commercial_status, COUNT(*) AS total FROM repo_expirations WHERE date BETWEEN ? AND ?${commercialFilter.clause} GROUP BY status, commercial_status`, [start, end, ...commercialFilter.params]);
     const damageRows = await query("SELECT COUNT(*) AS total FROM repo_damages WHERE date BETWEEN ? AND ?", [start, end]);
@@ -631,11 +1001,11 @@ async function api(req, res, url) {
       `,
       [start, end, start, end, start, end, start, end]
     );
-    const taskTotal = taskRows.reduce((sum, row) => sum + Number(row.total || 0), 0);
-    const completed = taskRows.filter((row) => row.status === "Realizado").reduce((sum, row) => sum + Number(row.total || 0), 0);
+    const submittedTaskTotal = taskRows.reduce((sum, row) => sum + Number(row.total || 0), 0);
+    const expectedTaskTotal = Math.max(0, repoActivities.length * period.days);
+    const completed = Math.min(Number(completedTaskRows[0]?.total || 0), expectedTaskTotal || Number(completedTaskRows[0]?.total || 0));
     const ruptures = ruptureRows.reduce((sum, row) => sum + Number(row.total || 0), 0);
     const expirations = expirationRows.reduce((sum, row) => sum + Number(row.total || 0), 0);
-    const period = periodInfo(start, end);
     const repoUserCounts = await query(
       `
       SELECT u.id, u.display_name AS name, COUNT(t.id) AS total
@@ -651,10 +1021,10 @@ async function api(req, res, url) {
       `
       SELECT activity, COUNT(DISTINCT date) AS total
       FROM repo_tasks
-      WHERE date BETWEEN ? AND ? AND status = 'Realizado'
+      WHERE date BETWEEN ? AND ? AND status = 'Realizado'${repoScopeClause}
       GROUP BY activity
       `,
-      [start, end]
+      [start, end, ...repoScopeParams]
     );
     const repoActivityMap = new Map(repoActivityCounts.map((row) => [row.activity, Number(row.total || 0)]));
     const commercialUserCounts = await query(
@@ -676,9 +1046,10 @@ async function api(req, res, url) {
     const commercialTotalByUsers = commercialUserCounts.reduce((sum, row) => sum + Number(row.total || 0), 0);
     return send(res, 200, {
       summary: {
-        taskTotal,
+        taskTotal: expectedTaskTotal,
+        submittedTasks: submittedTaskTotal,
         completed,
-        pending: taskTotal - completed,
+        pending: Math.max(expectedTaskTotal - completed, 0),
         ruptures,
         rupturesPurchased: ruptureRows.filter((row) => row.commercial_status === "Pedido realizado").reduce((sum, row) => sum + Number(row.total || 0), 0),
         expirations,
@@ -708,6 +1079,65 @@ async function api(req, res, url) {
         percent: commercialTotalByUsers ? Math.round((Number(row.total || 0) / commercialTotalByUsers) * 100) : 0,
       })),
     });
+  }
+
+  if (method === "GET" && url.pathname === "/api/sector-audits") {
+    if (!isAdmin(user)) return send(res, 403, { error: "Apenas administrador pode acessar a conferência gerencial." });
+    const start = url.searchParams.get("startDate") || today();
+    const end = url.searchParams.get("endDate") || start;
+    const focus = url.searchParams.get("focus") || "abastecimento";
+    const rows = await sectorAuditDashboard(start, end, focus);
+    const totalRows = await query(
+      "SELECT COUNT(*) AS total FROM sector_audit_reviews WHERE date BETWEEN ? AND ? AND focus = ?",
+      [start, end, focus]
+    );
+    const userRows = await query(
+      "SELECT COUNT(*) AS total FROM sector_audit_reviews WHERE date BETWEEN ? AND ? AND focus = ? AND audited_by = ?",
+      [start, end, focus, user.id]
+    );
+    return send(res, 200, {
+      rows,
+      summary: {
+        evaluatedTotal: Number(totalRows[0]?.total || 0),
+        evaluatedByUser: Number(userRows[0]?.total || 0),
+      },
+    });
+  }
+
+  if (method === "POST" && url.pathname === "/api/sector-audits") {
+    if (!isAdmin(user)) return send(res, 403, { error: "Apenas administrador pode salvar a conferência gerencial." });
+    const body = await readBody(req);
+    const managerStatus = ["Pendente", "Confere", "N\u00e3o confere", "Corrigir"].includes(body.managerStatus) ? body.managerStatus : "Pendente";
+    const focus = body.focus || "abastecimento";
+    await execute(
+      `
+      INSERT INTO sector_audit_reviews (
+        date, sector, focus, manager_status, observation, action_required, responsible, due_date, audited_by, audited_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(date, sector, focus) DO UPDATE SET
+        manager_status=excluded.manager_status,
+        observation=excluded.observation,
+        action_required=excluded.action_required,
+        responsible=excluded.responsible,
+        due_date=excluded.due_date,
+        audited_by=excluded.audited_by,
+        audited_at=excluded.audited_at
+      `,
+      [
+        body.date || today(),
+        body.sector,
+        focus,
+        managerStatus,
+        body.observation || "",
+        body.actionRequired || "",
+        body.responsible || "",
+        body.dueDate || "",
+        user.id,
+        nowIso(),
+      ]
+    );
+    await logAudit(user, "upsert", "sector_audit_reviews", `${body.date || today()}|${body.sector}|${focus}`, { managerStatus });
+    return send(res, 200, { ok: true });
   }
 
   if (method === "GET" && url.pathname === "/api/reposition/tasks") {
@@ -745,7 +1175,11 @@ async function api(req, res, url) {
   if (method === "GET" && url.pathname === "/api/reposition/ruptures") {
     if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
     const filter = await commercialSectorFilter(user);
-    return send(res, 200, { rows: await query(`SELECT * FROM repo_ruptures WHERE 1 = 1${filter.clause} ORDER BY date DESC, id DESC`, filter.params) });
+    const start = url.searchParams.get("startDate");
+    const end = url.searchParams.get("endDate") || start;
+    const dateClause = start ? " AND date BETWEEN ? AND ?" : "";
+    const dateParams = start ? [start, end] : [];
+    return send(res, 200, { rows: await query(`SELECT * FROM repo_ruptures WHERE 1 = 1${filter.clause}${dateClause} ORDER BY date DESC, id DESC`, [...filter.params, ...dateParams]) });
   }
 
   if (method === "POST" && url.pathname === "/api/reposition/ruptures") {
@@ -778,7 +1212,11 @@ async function api(req, res, url) {
   if (method === "GET" && url.pathname === "/api/reposition/expirations") {
     if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
     const filter = await commercialSectorFilter(user);
-    return send(res, 200, { rows: await query(`SELECT * FROM repo_expirations WHERE 1 = 1${filter.clause} ORDER BY date DESC, id DESC`, filter.params) });
+    const start = url.searchParams.get("startDate");
+    const end = url.searchParams.get("endDate") || start;
+    const dateClause = start ? " AND date BETWEEN ? AND ?" : "";
+    const dateParams = start ? [start, end] : [];
+    return send(res, 200, { rows: await query(`SELECT * FROM repo_expirations WHERE 1 = 1${filter.clause}${dateClause} ORDER BY date DESC, id DESC`, [...filter.params, ...dateParams]) });
   }
 
   if (method === "POST" && url.pathname === "/api/reposition/expirations") {
@@ -810,7 +1248,11 @@ async function api(req, res, url) {
 
   if (method === "GET" && url.pathname === "/api/reposition/damages") {
     if (!canAccessReposition(user)) return send(res, 403, { error: "Acesso restrito ao módulo de reposição." });
-    return send(res, 200, { rows: await query("SELECT * FROM repo_damages ORDER BY date DESC, id DESC") });
+    const start = url.searchParams.get("startDate");
+    const end = url.searchParams.get("endDate") || start;
+    const dateClause = start ? "WHERE date BETWEEN ? AND ?" : "";
+    const dateParams = start ? [start, end] : [];
+    return send(res, 200, { rows: await query(`SELECT * FROM repo_damages ${dateClause} ORDER BY date DESC, id DESC`, dateParams) });
   }
 
   if (method === "POST" && url.pathname === "/api/reposition/damages") {
@@ -830,7 +1272,7 @@ async function api(req, res, url) {
     return send(res, 200, {
       rows: await query(
         `
-        SELECT u.id, u.username, u.password, u.role, u.display_name, u.collaborator_id, u.status,
+        SELECT u.id, u.username, u.role, u.display_name, u.collaborator_id, u.status,
                c.name AS collaborator
         FROM users u
         LEFT JOIN collaborators c ON c.id = u.collaborator_id
@@ -843,17 +1285,19 @@ async function api(req, res, url) {
   if (method === "POST" && url.pathname === "/api/users") {
     if (!isAdmin(user)) return send(res, 403, { error: "Apenas administrador pode gerenciar acessos." });
     const body = await readBody(req);
+    if (!body.password) return send(res, 400, { error: "Informe uma senha para criar o acesso." });
     await execute(
       "INSERT INTO users (username, password, role, display_name, collaborator_id, status) VALUES (?, ?, ?, ?, ?, ?)",
       [
         body.username,
-        body.password,
+        hashPassword(body.password),
         body.role || "colaborador",
         body.displayName,
         body.collaboratorId || null,
         body.status || "ativo",
       ]
     );
+    await logAudit(user, "create", "users", body.username, { role: body.role, displayName: body.displayName });
     return send(res, 201, { ok: true });
   }
 
@@ -861,18 +1305,21 @@ async function api(req, res, url) {
     if (!isAdmin(user)) return send(res, 403, { error: "Apenas administrador pode gerenciar acessos." });
     const id = Number(url.pathname.split("/").pop());
     const body = await readBody(req);
+    const passwordSql = body.password ? ", password = ?" : "";
+    const params = [
+      body.username,
+      body.role,
+      body.displayName,
+      body.collaboratorId || null,
+      body.status,
+    ];
+    if (body.password) params.push(hashPassword(body.password));
+    params.push(id);
     await execute(
-      "UPDATE users SET username = ?, password = ?, role = ?, display_name = ?, collaborator_id = ?, status = ? WHERE id = ?",
-      [
-        body.username,
-        body.password,
-        body.role,
-        body.displayName,
-        body.collaboratorId || null,
-        body.status,
-        id,
-      ]
+      `UPDATE users SET username = ?, role = ?, display_name = ?, collaborator_id = ?, status = ?${passwordSql} WHERE id = ?`,
+      params
     );
+    await logAudit(user, "update", "users", id, { username: body.username, role: body.role, status: body.status, passwordChanged: Boolean(body.password) });
     return send(res, 200, { ok: true });
   }
 
@@ -881,6 +1328,7 @@ async function api(req, res, url) {
     const id = Number(url.pathname.split("/").pop());
     if (id === user.id) return send(res, 400, { error: "VocÃª nÃ£o pode excluir o prÃ³prio acesso enquanto estÃ¡ logado." });
     await execute("DELETE FROM users WHERE id = ?", [id]);
+    await logAudit(user, "delete", "users", id);
     return send(res, 200, { ok: true, message: "Acesso excluÃ­do." });
   }
 
@@ -901,6 +1349,7 @@ async function api(req, res, url) {
       body.sector || "",
       body.status || "ativo",
     ]);
+    await logAudit(user, "create", "collaborators", body.name, { role: body.role, sector: body.sector || "", status: body.status || "ativo" });
     return send(res, 201, { ok: true });
   }
 
@@ -915,6 +1364,7 @@ async function api(req, res, url) {
       body.status,
       id,
     ]);
+    await logAudit(user, "update", "collaborators", id, { name: body.name, role: body.role, sector: body.sector || "", status: body.status });
     return send(res, 200, { ok: true });
   }
 
@@ -926,6 +1376,7 @@ async function api(req, res, url) {
     await execute("UPDATE users SET collaborator_id = NULL, status = 'inativo' WHERE collaborator_id = ?", [id]);
     if (checklistCount > 0 || pendencyCount > 0) {
       await execute("UPDATE collaborators SET status = 'inativo' WHERE id = ?", [id]);
+      await logAudit(user, "inactivate", "collaborators", id);
       return send(res, 200, {
         ok: true,
         mode: "inactivated",
@@ -933,6 +1384,7 @@ async function api(req, res, url) {
       });
     }
     await execute("DELETE FROM collaborators WHERE id = ?", [id]);
+    await logAudit(user, "delete", "collaborators", id);
     return send(res, 200, { ok: true, mode: "deleted", message: "Colaborador excluÃ­do." });
   }
 
@@ -951,14 +1403,18 @@ async function api(req, res, url) {
       return send(res, 403, { error: "Apenas a encarregada pode preencher perdas, consumos e vasilhames." });
     }
     const specificFields = checklistSpecificFields(body.activity, body);
+    if (activityNeedsProductSector(body.activity) && !specificFields.sector) {
+      return send(res, 400, { error: "Selecione o setor do produto." });
+    }
     await execute(
-      "INSERT INTO checklists (date, collaborator_id, activity, answer, observation, price_divergence_products, expired_products, sent_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO checklists (date, collaborator_id, activity, answer, observation, sector, price_divergence_products, expired_products, sent_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         date,
         collaboratorId,
         body.activity,
         body.answer,
         body.observation || "",
+        specificFields.sector,
         specificFields.priceDivergenceProducts,
         specificFields.expiredProducts,
         nowIso(),
@@ -982,13 +1438,17 @@ async function api(req, res, url) {
     }
     const collaboratorId = canCorrect(user) ? body.collaboratorId : user.collaborator_id || body.collaboratorId;
     const specificFields = checklistSpecificFields(body.activity, body);
+    if (activityNeedsProductSector(body.activity) && !specificFields.sector) {
+      return send(res, 400, { error: "Selecione o setor do produto." });
+    }
     await execute(
-      "UPDATE checklists SET collaborator_id = ?, activity = ?, answer = ?, observation = ?, price_divergence_products = ?, expired_products = ?, corrected_by = ?, corrected_at = ? WHERE id = ?",
+      "UPDATE checklists SET collaborator_id = ?, activity = ?, answer = ?, observation = ?, sector = ?, price_divergence_products = ?, expired_products = ?, corrected_by = ?, corrected_at = ? WHERE id = ?",
       [
         collaboratorId,
         body.activity,
         body.answer,
         body.observation || "",
+        specificFields.sector,
         specificFields.priceDivergenceProducts,
         specificFields.expiredProducts,
         user.id,
@@ -1119,7 +1579,9 @@ async function api(req, res, url) {
         .filter((row) => activities.includes(row.activity))
         .map((row) => `${row.date}|${row.activity}`)
     );
-    const pendingToday = Math.max((activities.length * currentMonth.days) - completedActivityKeys.size, 0);
+    const expectedChecklistTotal = activities.length * currentMonth.days;
+    const completedChecklistTotal = completedActivityKeys.size;
+    const pendingToday = Math.max(expectedChecklistTotal - completedChecklistTotal, 0);
     const byCollaborator = await query(
       `
       SELECT col.name, COUNT(*) AS total
@@ -1139,7 +1601,7 @@ async function api(req, res, url) {
         AND c.activity NOT IN (?, ?, ?)
       WHERE col.status = 'ativo'
         AND u.status = 'ativo'
-        AND u.role IN ('prevencao', 'colaborador', 'encarregada')
+        AND u.role IN ('prevencao', 'colaborador')
       GROUP BY col.id, col.name
       ORDER BY col.name
       `,
@@ -1176,6 +1638,8 @@ async function api(req, res, url) {
     return send(res, 200, {
       totalsByDay,
       pendingToday,
+      expectedChecklistTotal,
+      completedChecklistTotal,
       summary,
       byCollaborator,
       month: currentMonth,
